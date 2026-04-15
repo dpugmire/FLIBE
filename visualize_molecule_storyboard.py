@@ -156,6 +156,11 @@ ATOM_COLORS = {
 }
 DEFAULT_COLOR = (0.800, 0.800, 0.800, 1.0)
 
+# Optional custom colors for the two highlighted fluorides.
+# Set to None to fall back to the default fluorine color from ATOM_COLORS["F"].
+FLUORIDE_1_COLOR = (0.565, 0.878, 0.314, 1.0)
+FLUORIDE_2_COLOR = (0.365, 0.820, 0.560, 1.0)
+
 
 # ┌─────────────────────────────────────────────────────────────────────────────┐
 # │                             INTERNAL FUNCTIONS                             │
@@ -364,21 +369,36 @@ def make_material(element):
     return mat
 
 
-def create_element_objects(element, positions, collection):
+def make_material_with_color(mat_name, color_rgba):
+    """Create (or reuse) a material with an explicit RGBA base color."""
+    if mat_name in bpy.data.materials:
+        return bpy.data.materials[mat_name]
+    mat  = bpy.data.materials.new(name=mat_name)
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    bsdf.inputs["Base Color"].default_value = color_rgba
+    bsdf.inputs["Metallic"].default_value   = 0.15
+    bsdf.inputs["Roughness"].default_value  = 0.25
+    return mat
+
+
+def create_element_objects(element, positions, collection, object_name=None, material=None):
     """Build a vertex-instancer for one element. Returns (parent_obj, sphere_obj)."""
     import bmesh
 
-    mesh  = bpy.data.meshes.new(element)
+    obj_name = object_name if object_name else element
+
+    mesh  = bpy.data.meshes.new(obj_name)
     verts = [(x * SCALE, y * SCALE, z * SCALE) for x, y, z in positions]
     mesh.from_pydata(verts, [], [])
     mesh.update()
 
-    parent_obj = bpy.data.objects.new(element, mesh)
+    parent_obj = bpy.data.objects.new(obj_name, mesh)
     collection.objects.link(parent_obj)
     parent_obj.instance_type = "VERTS"
 
     radius_bu   = ATOM_RADII.get(element, DEFAULT_RADIUS) * SCALE
-    sphere_mesh = bpy.data.meshes.new(f"{element}_sphere")
+    sphere_mesh = bpy.data.meshes.new(f"{obj_name}_sphere")
     bm = bmesh.new()
     bmesh.ops.create_uvsphere(bm, u_segments=SPHERE_SEGMENTS,
                               v_segments=SPHERE_RINGS, radius=radius_bu)
@@ -390,7 +410,7 @@ def create_element_objects(element, positions, collection):
         sphere_mesh.auto_smooth_angle = math.radians(180)
     sphere_mesh.update()
 
-    sphere_obj        = bpy.data.objects.new(f"{element}_template", sphere_mesh)
+    sphere_obj        = bpy.data.objects.new(f"{obj_name}_template", sphere_mesh)
     sphere_obj.parent = parent_obj
     collection.objects.link(sphere_obj)
 
@@ -400,7 +420,7 @@ def create_element_objects(element, positions, collection):
     sphere_obj.hide_set(True)
     sphere_obj.hide_render = False
 
-    mat = make_material(element)
+    mat = material if material is not None else make_material(element)
     if sphere_obj.data.materials:
         sphere_obj.data.materials[0] = mat
     else:
@@ -522,7 +542,7 @@ def setup_camera_animation(cam, target, focus_pos, centroid, cluster_center):
 
 # ── Storyboard frame handler ──────────────────────────────────────────────────
 
-def register_storyboard_handler(coords, atom_order, instancer_objects):
+def register_storyboard_handler(coords, instancer_objects, instancer_index_map):
     """
     Register a frame_change_pre handler that drives the storyboard each frame.
 
@@ -534,12 +554,6 @@ def register_storyboard_handler(coords, atom_order, instancer_objects):
       Seg 5 (DCD 1350–1550): FOCUS_INDICES (+ TRITIUM_IDX/F1/F2 guaranteed)
     """
     n_traj = coords.shape[0]
-
-    # Build element → numpy array of global (PDB-order) atom indices
-    elem_idxs_np = {}
-    for g_idx, elem in enumerate(atom_order):
-        elem_idxs_np.setdefault(elem, []).append(g_idx)
-    elem_idxs_np = {e: np.array(v) for e, v in elem_idxs_np.items()}
 
     # Pre-built visibility arrays for each segment
     seg23_vis = np.array(get_zoom_focus_indices(), dtype=np.int32)
@@ -568,9 +582,9 @@ def register_storyboard_handler(coords, atom_order, instancer_objects):
             else:                  # seg 5
                 vis_idx = seg5_vis
 
-        # Update each element's instancer mesh
-        for elem, obj in instancer_objects.items():
-            g_idxs = elem_idxs_np.get(elem)
+        # Update each instancer mesh from its own global atom index list
+        for obj_name, obj in instancer_objects.items():
+            g_idxs = instancer_index_map.get(obj_name)
             if g_idxs is None:
                 continue
 
@@ -635,12 +649,62 @@ def main():
     mol_col = bpy.data.collections.new(col_name)
     bpy.context.scene.collection.children.link(mol_col)
 
-    # 4. Build instancer objects (one per element)
+    # 4. Build instancer objects (one per element), with dedicated objects for
+    #    FLUORIDE_1_IDX and FLUORIDE_2_IDX so they can have distinct colors.
+    element_global_indices = {}
+    for g_idx, elem in enumerate(atom_order):
+        element_global_indices.setdefault(elem, []).append(g_idx)
+
     instancer_objects = {}
-    for element, positions in sorted(atoms_by_element.items()):
-        parent_obj, _ = create_element_objects(element, positions, mol_col)
-        instancer_objects[element] = parent_obj
-        print(f"  Instancer: {element} ({len(positions)} atoms)")
+    instancer_index_map = {}
+
+    for element in sorted(element_global_indices.keys()):
+        g_idxs = element_global_indices[element]
+
+        if element != "F":
+            positions = [flat_positions[i] for i in g_idxs]
+            parent_obj, _ = create_element_objects(element, positions, mol_col, object_name=element)
+            instancer_objects[element] = parent_obj
+            instancer_index_map[element] = np.array(g_idxs, dtype=np.int32)
+            print(f"  Instancer: {element} ({len(g_idxs)} atoms)")
+            continue
+
+        # Split fluorine into bulk + two singled-out fluorides.
+        special_f = {FLUORIDE_1_IDX, FLUORIDE_2_IDX}
+        f_bulk_idxs = [i for i in g_idxs if i not in special_f]
+
+        if f_bulk_idxs:
+            positions = [flat_positions[i] for i in f_bulk_idxs]
+            parent_obj, _ = create_element_objects(element, positions, mol_col, object_name="F")
+            instancer_objects["F"] = parent_obj
+            instancer_index_map["F"] = np.array(f_bulk_idxs, dtype=np.int32)
+            print(f"  Instancer: F ({len(f_bulk_idxs)} atoms)")
+
+        if FLUORIDE_1_IDX in g_idxs:
+            f1_color = FLUORIDE_1_COLOR if FLUORIDE_1_COLOR is not None else ATOM_COLORS.get("F", DEFAULT_COLOR)
+            f1_mat   = make_material_with_color("Atom_F_1", f1_color)
+            positions = [flat_positions[FLUORIDE_1_IDX]]
+            parent_obj, _ = create_element_objects(
+                "F", positions, mol_col, object_name="F_1", material=f1_mat
+            )
+            instancer_objects["F_1"] = parent_obj
+            instancer_index_map["F_1"] = np.array([FLUORIDE_1_IDX], dtype=np.int32)
+            print(f"  Instancer: F_1 (index {FLUORIDE_1_IDX})")
+        else:
+            print(f"WARNING: FLUORIDE_1_IDX {FLUORIDE_1_IDX} is not a fluorine atom in this PDB.")
+
+        if FLUORIDE_2_IDX in g_idxs:
+            f2_color = FLUORIDE_2_COLOR if FLUORIDE_2_COLOR is not None else ATOM_COLORS.get("F", DEFAULT_COLOR)
+            f2_mat   = make_material_with_color("Atom_F_2", f2_color)
+            positions = [flat_positions[FLUORIDE_2_IDX]]
+            parent_obj, _ = create_element_objects(
+                "F", positions, mol_col, object_name="F_2", material=f2_mat
+            )
+            instancer_objects["F_2"] = parent_obj
+            instancer_index_map["F_2"] = np.array([FLUORIDE_2_IDX], dtype=np.int32)
+            print(f"  Instancer: F_2 (index {FLUORIDE_2_IDX})")
+        else:
+            print(f"WARNING: FLUORIDE_2_IDX {FLUORIDE_2_IDX} is not a fluorine atom in this PDB.")
 
     # 5. Compute molecule centroid and zoom-focus position (from static PDB)
     n_atoms  = len(flat_positions)
@@ -725,7 +789,7 @@ def main():
           f"(DCD frames {SEG1_DCD_START}–{SEG5_DCD_END})")
 
     # 10. Register storyboard frame handler
-    register_storyboard_handler(coords, atom_order, instancer_objects)
+    register_storyboard_handler(coords, instancer_objects, instancer_index_map)
 
     # 11. Switch viewport to Material Preview (GUI only)
     if bpy.context.screen is not None:
