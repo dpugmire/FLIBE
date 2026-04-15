@@ -13,9 +13,9 @@ Frame mapping
 
 Storyboard (boundaries given as DCD frame numbers):
   Seg 1  DCD  700– 900 : all atoms, animated
-  Seg 2  DCD  900–1000 : zoom to tritium + both fluorides
-  Seg 3  DCD 1000–1150 : animate tritium + both fluorides
-  Seg 4  DCD 1150–1350 : continue tritium + both fluorides
+  Seg 2  DCD  900–1000 : start zoom/pan toward H + 2F focus group
+  Seg 3  DCD 1000–1150 : close-up on H + 2F
+  Seg 4  DCD 1150–1350 : continue close-up
   Seg 5  DCD 1350–1550 : animate user-defined FOCUS_INDICES list
 """
 
@@ -61,6 +61,12 @@ SEG4_DCD_START = 1150   # Seg 4 begins: continue tritium + F_1 + F_2
 SEG5_DCD_START = 1350   # Seg 5 begins: animate FOCUS_INDICES
 SEG5_DCD_END   = 1550   # end of animation
 
+# ── Zoom / visibility timing controls (DCD frame numbers) ─────────────────────
+# Start camera zoom/pan at this frame (all atoms can still be visible here).
+ZOOM_START_DCD = SEG2_DCD_START
+# Hide non-focus atoms at this frame and keep only H + 2F atoms visible.
+HIDE_OTHERS_DCD_START = SEG3_DCD_START
+
 # ── Key atom indices (0-based, matching PDB ATOM/HETATM record order) ─────────
 # NOTE: PDB HETATM serial numbers are 1-based; subtract 1 to get 0-based index.
 #   e.g. PDB serial 1681 (TR1/Tritium)  → index 1680
@@ -69,6 +75,10 @@ SEG5_DCD_END   = 1550   # end of animation
 TRITIUM_IDX    = 1680
 FLUORIDE_1_IDX = 86
 FLUORIDE_2_IDX = 856
+
+# ── Zoom-focus atom list (H + 2F by default) ──────────────────────────────────
+# The script guarantees TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX are included.
+ZOOM_FOCUS_INDICES = [TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX]
 
 # ── Segment-5 focus atom list ─────────────────────────────────────────────────
 # Replace these with your actual indices (0-based). Any number of indices is fine.
@@ -98,10 +108,10 @@ CAM_INITIAL_SPACE = "WORLD"           # "WORLD" or "LOCAL"
 # Distance (Blender units; 1 BU = 10 Å) from AtomCentre for each segment.
 # Larger = further away / more zoomed out.
 CAM_DIST_SEG1 = 15.0   # Seg 1: wide shot — all atoms
-CAM_DIST_SEG2 = 15.0   # Seg 2: hold wide while target pans to tritium
-CAM_DIST_SEG3 =  3.0   # Seg 3: close-up — tritium + two fluorides
-CAM_DIST_SEG4 =  3.0   # Seg 4: same close-up — tritium + two fluorides
-CAM_DIST_SEG5 =  8.0   # Seg 5: backed off — focus cluster
+CAM_DIST_SEG2 = 15.0   # At ZOOM_START_DCD: start zoom/pan toward H + 2F focus
+CAM_DIST_SEG3 =  2.0   # Seg 3: close-up — H + two fluorides
+CAM_DIST_SEG4 =  2.0   # Seg 4: same close-up — H + two fluorides
+CAM_DIST_SEG5 =  4.0 #8.0   # Seg 5: backed off — focus cluster
 
 # ── Display ───────────────────────────────────────────────────────────────────
 SCALE = 0.1          # Å → Blender units  (1 Å = 0.1 BU)
@@ -119,8 +129,10 @@ ATOM_RADII = {
 }
 DEFAULT_RADIUS = 1.50
 
-ATOM_RADII['F'] = 0.6
-ATOM_RADII['H'] = 0.3
+ATOM_RADII['F'] *= 0.5
+ATOM_RADII['H'] *= 0.25
+ATOM_RADII['Be'] *= 0.5
+ATOM_RADII['Li'] *= 0.5
 
 # ── CPK colours (RGBA, linear sRGB, values 0.0–1.0) ──────────────────────────
 ATOM_COLORS = {
@@ -208,6 +220,20 @@ def get_interpolated_coords(coords, bl_frame):
         )
 
     raise ValueError(f'INTERP_MODE must be "nearest", "linear", or "spline" (got {INTERP_MODE!r}).')
+
+
+def get_zoom_focus_indices():
+    """
+    Zoom-focus atom list, guaranteed to include tritium + both fluorides.
+
+    Preserves user-provided ZOOM_FOCUS_INDICES order and appends missing
+    required indices at the end.
+    """
+    zoom_indices = list(ZOOM_FOCUS_INDICES)
+    for required_idx in (TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX):
+        if required_idx not in zoom_indices:
+            zoom_indices.append(required_idx)
+    return zoom_indices
 
 
 def get_seg5_focus_indices():
@@ -439,12 +465,12 @@ def setup_camera_animation(cam, target, focus_pos, centroid, cluster_center):
     Animation overview
     ------------------
     target.location keyframes move the look-at point:
-        Seg 1–2  →  molecule centroid   (wide overview)
-        Seg 3–4  →  tritium position    (close-up)
+        Seg 1–2  →  molecule centroid      (wide overview)
+        Seg 3–4  →  zoom-focus centroid    (H + 2F close-up)
         Seg 5    →  cluster centroid    (focus group)
 
     cam.location keyframes (LOCAL space) change the orbital distance:
-        Seg 1–2  →  CAM_DIST_SEG1 / CAM_DIST_SEG2   (far)
+        Seg 1–2  →  CAM_DIST_SEG1 / CAM_DIST_SEG2   (wide to zoom start)
         Seg 3–4  →  CAM_DIST_SEG3 / CAM_DIST_SEG4   (close)
         Seg 5    →  CAM_DIST_SEG5                    (mid)
 
@@ -453,7 +479,7 @@ def setup_camera_animation(cam, target, focus_pos, centroid, cluster_center):
     seg1_local, cam_dir = get_initial_camera_local_offset(centroid)
 
     seg1_bl     = dcd_to_bl(SEG1_DCD_START)
-    seg2_bl     = dcd_to_bl(SEG2_DCD_START)
+    zoom_start_bl = dcd_to_bl(ZOOM_START_DCD)
     seg3_bl     = dcd_to_bl(SEG3_DCD_START)
     seg5_bl     = dcd_to_bl(SEG5_DCD_START)
     seg5_end_bl = dcd_to_bl(SEG5_DCD_END)
@@ -466,7 +492,7 @@ def setup_camera_animation(cam, target, focus_pos, centroid, cluster_center):
     cam.keyframe_insert(data_path="location", frame=seg1_bl)
 
     cam.location = cam_dir * CAM_DIST_SEG2
-    cam.keyframe_insert(data_path="location", frame=seg2_bl)   # transition starts
+    cam.keyframe_insert(data_path="location", frame=zoom_start_bl)   # transition starts
 
     cam.location = cam_dir * CAM_DIST_SEG3
     cam.keyframe_insert(data_path="location", frame=seg3_bl)   # zoomed in
@@ -480,10 +506,10 @@ def setup_camera_animation(cam, target, focus_pos, centroid, cluster_center):
     # ── Target WORLD location keyframes (pan / look-at point) ─────────────────
     target.location = centroid
     target.keyframe_insert(data_path="location", frame=seg1_bl)
-    target.keyframe_insert(data_path="location", frame=seg2_bl)   # hold at centroid
+    target.keyframe_insert(data_path="location", frame=zoom_start_bl)   # hold at centroid
 
     target.location = focus_pos
-    target.keyframe_insert(data_path="location", frame=seg3_bl)   # pan to tritium
+    target.keyframe_insert(data_path="location", frame=seg3_bl)   # pan to zoom-focus group
     target.keyframe_insert(data_path="location", frame=seg5_bl)   # hold through seg 4
 
     target.location = cluster_center
@@ -502,7 +528,7 @@ def register_storyboard_handler(coords, atom_order, instancer_objects):
 
     Atom visibility by segment:
       Seg 1 (DCD 700– 900) : all atoms
-      Seg 2 (DCD 900–1000) : TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX
+      Seg 2 (DCD 900–1000) : all atoms (zoom can already be in progress)
       Seg 3 (DCD 1000–1150): TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX
       Seg 4 (DCD 1150–1350): TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX
       Seg 5 (DCD 1350–1550): FOCUS_INDICES (+ TRITIUM_IDX/F1/F2 guaranteed)
@@ -516,12 +542,12 @@ def register_storyboard_handler(coords, atom_order, instancer_objects):
     elem_idxs_np = {e: np.array(v) for e, v in elem_idxs_np.items()}
 
     # Pre-built visibility arrays for each segment
-    seg23_vis = np.array([TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX])
-    seg4_vis  = np.array([TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX])
+    seg23_vis = np.array(get_zoom_focus_indices(), dtype=np.int32)
+    seg4_vis  = np.array(get_zoom_focus_indices(), dtype=np.int32)
     seg5_vis  = np.array(get_seg5_focus_indices(), dtype=np.int32)
 
     # Precompute Blender boundary frames
-    seg2_bl = dcd_to_bl(SEG2_DCD_START)
+    hide_others_bl = dcd_to_bl(HIDE_OTHERS_DCD_START)
     seg4_bl = dcd_to_bl(SEG4_DCD_START)
     seg5_bl = dcd_to_bl(SEG5_DCD_START)
 
@@ -530,12 +556,12 @@ def register_storyboard_handler(coords, atom_order, instancer_objects):
         frame_xyz = get_interpolated_coords(coords, bf)   # (natoms, 3) in Å
 
         # Determine visibility mode for this frame
-        if bf < seg2_bl:
+        if bf < hide_others_bl:
             show_all = True
             vis_idx  = None
         else:
             show_all = False
-            if bf < seg4_bl:       # segs 2 and 3
+            if bf < seg4_bl:       # zoom-focus phase before seg 4 boundary
                 vis_idx = seg23_vis
             elif bf < seg5_bl:     # seg 4
                 vis_idx = seg4_vis
@@ -579,6 +605,12 @@ def main():
         raise ValueError("FRAME_STEP must be >= 1.")
     if INTERP_MODE.strip().lower() not in {"nearest", "linear", "spline"}:
         raise ValueError('INTERP_MODE must be "nearest", "linear", or "spline".')
+    if not (SEG1_DCD_START <= ZOOM_START_DCD <= SEG5_DCD_END):
+        raise ValueError("ZOOM_START_DCD must be between SEG1_DCD_START and SEG5_DCD_END.")
+    if not (SEG1_DCD_START <= HIDE_OTHERS_DCD_START <= SEG5_DCD_END):
+        raise ValueError("HIDE_OTHERS_DCD_START must be between SEG1_DCD_START and SEG5_DCD_END.")
+    if ZOOM_START_DCD > HIDE_OTHERS_DCD_START:
+        raise ValueError("ZOOM_START_DCD must be <= HIDE_OTHERS_DCD_START.")
 
     # 1. Clear scene
     bpy.ops.object.select_all(action="SELECT")
@@ -610,18 +642,21 @@ def main():
         instancer_objects[element] = parent_obj
         print(f"  Instancer: {element} ({len(positions)} atoms)")
 
-    # 5. Compute molecule centroid and tritium position (from static PDB)
+    # 5. Compute molecule centroid and zoom-focus position (from static PDB)
     n_atoms  = len(flat_positions)
     cx = sum(p[0] for p in flat_positions) / n_atoms * SCALE
     cy = sum(p[1] for p in flat_positions) / n_atoms * SCALE
     cz = sum(p[2] for p in flat_positions) / n_atoms * SCALE
     centroid = Vector((cx, cy, cz))
 
-    if TRITIUM_IDX < n_atoms:
-        tx, ty, tz = flat_positions[TRITIUM_IDX]
-        focus_pos  = Vector((tx * SCALE, ty * SCALE, tz * SCALE))
+    valid_zoom_focus = [i for i in get_zoom_focus_indices() if i < n_atoms]
+    if valid_zoom_focus:
+        zfx = sum(flat_positions[i][0] for i in valid_zoom_focus) / len(valid_zoom_focus) * SCALE
+        zfy = sum(flat_positions[i][1] for i in valid_zoom_focus) / len(valid_zoom_focus) * SCALE
+        zfz = sum(flat_positions[i][2] for i in valid_zoom_focus) / len(valid_zoom_focus) * SCALE
+        focus_pos = Vector((zfx, zfy, zfz))
     else:
-        print(f"WARNING: TRITIUM_IDX {TRITIUM_IDX} out of range — using centroid for zoom.")
+        print("WARNING: zoom-focus indices out of range — using centroid for zoom.")
         focus_pos = centroid
 
     # Centroid of the seg-5 focus cluster (from static PDB positions)
