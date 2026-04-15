@@ -42,6 +42,15 @@ SETUP_BLEND_FILE  = "//setup.blend"   # e.g. "//setup_base.blend" or "/abs/path/
 SETUP_CAMERA_NAME = ""   # optional exact camera object name in setup file
 SETUP_EMPTY_NAME  = ""   # optional exact empty target object name in setup file
 
+# Auto-light rig used when no setup file is provided (or setup has no lights).
+# Lights are positioned relative to the camera view direction and TrackTo AtomCentre.
+AUTO_LIGHT_DISTANCE_FACTOR = 1.6   # multiplied by current camera-target distance
+AUTO_LIGHT_MIN_DISTANCE    = 8.0
+AUTO_LIGHT_SIZE            = 7.5
+AUTO_LIGHT_POWER_RIGHT     = 1400.0
+AUTO_LIGHT_POWER_LEFT      = 350.0
+AUTO_LIGHT_POWER_TOP       = 1200.0
+
 # ── Trajectory sampling ───────────────────────────────────────────────────────
 # Use every Nth DCD frame.
 #   FRAME_STEP = 1   → all frames          (smooth but slow to scrub)
@@ -387,8 +396,8 @@ def make_material(element):
     mat.use_nodes = True
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     bsdf.inputs["Base Color"].default_value = ATOM_COLORS.get(element, DEFAULT_COLOR)
-    bsdf.inputs["Metallic"].default_value   = 0.15
-    bsdf.inputs["Roughness"].default_value  = 0.25
+    bsdf.inputs["Metallic"].default_value   = 0.0
+    bsdf.inputs["Roughness"].default_value  = 0.18
     return mat
 
 
@@ -400,8 +409,8 @@ def make_material_with_color(mat_name, color_rgba):
     mat.use_nodes = True
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     bsdf.inputs["Base Color"].default_value = color_rgba
-    bsdf.inputs["Metallic"].default_value   = 0.15
-    bsdf.inputs["Roughness"].default_value  = 0.25
+    bsdf.inputs["Metallic"].default_value   = 0.0
+    bsdf.inputs["Roughness"].default_value  = 0.18
     return mat
 
 
@@ -503,12 +512,7 @@ def load_setup_rig(setup_blend_path, collection):
             target = next((o for o in empties if o.name == "Empty"), empties[0])
 
     # Ensure camera tracks the chosen target.
-    track = next((c for c in cam.constraints if c.type == "TRACK_TO"), None)
-    if track is None:
-        track = cam.constraints.new(type="TRACK_TO")
-    track.target     = target
-    track.track_axis = "TRACK_NEGATIVE_Z"
-    track.up_axis    = "UP_Y"
+    ensure_track_to_constraint(cam, target)
 
     return cam, target, bool(lights)
 
@@ -517,6 +521,80 @@ def clear_object_animation(obj):
     """Remove existing animation data from an object, if any."""
     if obj is not None and obj.animation_data:
         obj.animation_data_clear()
+
+
+def ensure_track_to_constraint(obj, target):
+    """Ensure obj has a TrackTo constraint aimed at target."""
+    track = next((c for c in obj.constraints if c.type == "TRACK_TO"), None)
+    if track is None:
+        track = obj.constraints.new(type="TRACK_TO")
+    track.target     = target
+    track.track_axis = "TRACK_NEGATIVE_Z"
+    track.up_axis    = "UP_Y"
+    return track
+
+
+def create_area_light(name, location, power, size, collection, target):
+    """Create one area light at location, linked to collection, tracking target."""
+    light_data = bpy.data.lights.new(name, type="AREA")
+    light_data.energy = power
+    light_data.shape  = "SQUARE"
+    light_data.size   = size
+
+    light_obj = bpy.data.objects.new(name, light_data)
+    light_obj.location = location
+    collection.objects.link(light_obj)
+    ensure_track_to_constraint(light_obj, target)
+    return light_obj
+
+
+def create_default_three_point_lights(collection, target, cam):
+    """
+    Create right/left/top area lights based on camera view direction.
+    """
+    target_pos = target.matrix_world.translation.copy()
+    cam_pos    = cam.matrix_world.translation.copy()
+    cam_vec    = cam_pos - target_pos
+    if cam_vec.length < 1.0e-9:
+        cam_vec = Vector((0.0, -1.0, 0.0))
+    view_dir = cam_vec.normalized()  # direction from target to camera
+
+    world_up = Vector((0.0, 0.0, 1.0))
+    side_dir = view_dir.cross(world_up)
+    if side_dir.length < 1.0e-9:
+        side_dir = view_dir.cross(Vector((1.0, 0.0, 0.0)))
+    side_dir.normalize()
+
+    top_dir = world_up - view_dir * world_up.dot(view_dir)
+    if top_dir.length < 1.0e-9:
+        top_dir = Vector((0.0, 1.0, 0.0))
+    top_dir.normalize()
+
+    dist = max(cam_vec.length * AUTO_LIGHT_DISTANCE_FACTOR, AUTO_LIGHT_MIN_DISTANCE)
+
+    right_pos = target_pos + ( side_dir * 1.00 + top_dir * 0.25 + view_dir * 0.35) * dist
+    left_pos  = target_pos + (-side_dir * 1.00 + top_dir * 0.15 + view_dir * 0.20) * dist
+    top_pos   = target_pos + ( top_dir * 1.15 + view_dir * 0.10) * dist
+
+    create_area_light("MolAreaRight", right_pos, AUTO_LIGHT_POWER_RIGHT, AUTO_LIGHT_SIZE, collection, target)
+    create_area_light("MolAreaLeft",  left_pos,  AUTO_LIGHT_POWER_LEFT,  AUTO_LIGHT_SIZE, collection, target)
+    create_area_light("MolAreaTop",   top_pos,   AUTO_LIGHT_POWER_TOP,   AUTO_LIGHT_SIZE, collection, target)
+
+
+def force_black_world_background(scene):
+    """Force world background to black and remove world light contribution."""
+    world = scene.world
+    if world is None:
+        world = bpy.data.worlds.new("World")
+        scene.world = world
+
+    world.use_nodes = True
+    bg = world.node_tree.nodes.get("Background")
+    if bg is not None:
+        bg.inputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+        bg.inputs["Strength"].default_value = 0.0
+    else:
+        world.color = (0.0, 0.0, 0.0)
 
 
 def set_bezier(obj):
@@ -851,13 +929,8 @@ def main():
         clear_object_animation(target)
 
         if not has_lights:
-            print("WARNING: Setup file has no lights — creating default sun.")
-            extent          = max(abs(cx), abs(cy), abs(cz))
-            sun_data        = bpy.data.lights.new("MolSun", type="SUN")
-            sun_data.energy = 3.0
-            sun             = bpy.data.objects.new("MolSun", sun_data)
-            sun.location    = (cx, cy, cz + extent * 4.5)
-            mol_col.objects.link(sun)
+            print("WARNING: Setup file has no lights — creating default 3 area lights.")
+            create_default_three_point_lights(mol_col, target, cam)
     else:
         target = bpy.data.objects.new("AtomCentre", None)
         target.empty_display_type = "SPHERE"
@@ -880,17 +953,8 @@ def main():
         cam.location = initial_cam_local
 
         # TrackTo keeps the lens pointed at AtomCentre regardless of orbital distance
-        c = cam.constraints.new(type="TRACK_TO")
-        c.target     = target
-        c.track_axis = "TRACK_NEGATIVE_Z"
-        c.up_axis    = "UP_Y"
-
-        extent          = max(abs(cx), abs(cy), abs(cz))
-        sun_data        = bpy.data.lights.new("MolSun", type="SUN")
-        sun_data.energy = 3.0
-        sun             = bpy.data.objects.new("MolSun", sun_data)
-        sun.location    = (cx, cy, cz + extent * 4.5)
-        mol_col.objects.link(sun)
+        ensure_track_to_constraint(cam, target)
+        create_default_three_point_lights(mol_col, target, cam)
 
     # 7. Parse DCD trajectory
     traj_path = resolve_path(TRAJ_FILE, "traj_nvt.dcd")
@@ -909,6 +973,7 @@ def main():
     bpy.context.scene.frame_start   = bl_start
     bpy.context.scene.frame_end     = bl_end
     bpy.context.scene.frame_current = bl_start
+    force_black_world_background(bpy.context.scene)
     print(f"Timeline: Blender frames {bl_start}–{bl_end}  "
           f"(DCD frames {SEG1_DCD_START}–{SEG5_DCD_END})")
 
