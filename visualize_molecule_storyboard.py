@@ -36,6 +36,12 @@ from mathutils import Vector, Matrix
 PDB_FILE  = ""   # e.g. "/home/user/sim/structure.pdb"
 TRAJ_FILE = ""   # e.g. "/home/user/sim/traj_nvt.dcd"
 
+# Optional setup .blend containing camera, empty, track-to constraint, and lights.
+# If left empty, the script creates a default camera/empty/light rig from scratch.
+SETUP_BLEND_FILE  = "//setup.blend"   # e.g. "//setup_base.blend" or "/abs/path/setup_base.blend"
+SETUP_CAMERA_NAME = ""   # optional exact camera object name in setup file
+SETUP_EMPTY_NAME  = ""   # optional exact empty target object name in setup file
+
 # ── Trajectory sampling ───────────────────────────────────────────────────────
 # Use every Nth DCD frame.
 #   FRAME_STEP = 1   → all frames          (smooth but slow to scrub)
@@ -266,6 +272,23 @@ def resolve_path(user_path, filename):
     return candidate if os.path.isfile(candidate) else None
 
 
+def resolve_setup_blend_path(user_path):
+    """Resolve optional setup .blend path. Returns absolute path or None."""
+    if not user_path:
+        return None
+
+    # Supports Blender-style // relative paths and absolute paths.
+    candidate = os.path.abspath(bpy.path.abspath(user_path))
+    if os.path.isfile(candidate):
+        return candidate
+
+    candidate = os.path.abspath(user_path)
+    if os.path.isfile(candidate):
+        return candidate
+
+    return None
+
+
 def parse_pdb(filepath):
     """
     Parse ATOM/HETATM records.
@@ -427,6 +450,73 @@ def create_element_objects(element, positions, collection, object_name=None, mat
         sphere_obj.data.materials.append(mat)
 
     return parent_obj, sphere_obj
+
+
+def load_setup_rig(setup_blend_path, collection):
+    """
+    Append camera/empty/light objects from a setup .blend and return (camera, target, has_lights).
+    """
+    with bpy.data.libraries.load(setup_blend_path, link=False) as (data_from, data_to):
+        data_to.objects = data_from.objects
+
+    appended = [obj for obj in data_to.objects if obj is not None]
+    allowed_types = {"CAMERA", "EMPTY", "LIGHT"}
+    rig_objects = []
+
+    for obj in appended:
+        if obj.type in allowed_types:
+            if collection not in obj.users_collection:
+                collection.objects.link(obj)
+            rig_objects.append(obj)
+        else:
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+    cameras = [o for o in rig_objects if o.type == "CAMERA"]
+    empties = [o for o in rig_objects if o.type == "EMPTY"]
+    lights  = [o for o in rig_objects if o.type == "LIGHT"]
+
+    if not cameras:
+        raise ValueError(f"Setup file '{setup_blend_path}' has no camera objects.")
+    if not empties:
+        raise ValueError(f"Setup file '{setup_blend_path}' has no empty objects for TrackTo target.")
+
+    if SETUP_CAMERA_NAME:
+        cam = next((o for o in cameras if o.name == SETUP_CAMERA_NAME), None)
+        if cam is None:
+            raise ValueError(
+                f"SETUP_CAMERA_NAME '{SETUP_CAMERA_NAME}' not found in setup file '{setup_blend_path}'."
+            )
+    else:
+        cam = next((o for o in cameras if o.name == "Camera"), cameras[0])
+
+    if SETUP_EMPTY_NAME:
+        target = next((o for o in empties if o.name == SETUP_EMPTY_NAME), None)
+        if target is None:
+            raise ValueError(
+                f"SETUP_EMPTY_NAME '{SETUP_EMPTY_NAME}' not found in setup file '{setup_blend_path}'."
+            )
+    else:
+        track = next((c for c in cam.constraints if c.type == "TRACK_TO" and c.target is not None), None)
+        if track and track.target.type == "EMPTY":
+            target = track.target
+        else:
+            target = next((o for o in empties if o.name == "Empty"), empties[0])
+
+    # Ensure camera tracks the chosen target.
+    track = next((c for c in cam.constraints if c.type == "TRACK_TO"), None)
+    if track is None:
+        track = cam.constraints.new(type="TRACK_TO")
+    track.target     = target
+    track.track_axis = "TRACK_NEGATIVE_Z"
+    track.up_axis    = "UP_Y"
+
+    return cam, target, bool(lights)
+
+
+def clear_object_animation(obj):
+    """Remove existing animation data from an object, if any."""
+    if obj is not None and obj.animation_data:
+        obj.animation_data_clear()
 
 
 def set_bezier(obj):
@@ -734,39 +824,73 @@ def main():
         print("WARNING: FOCUS_INDICES out of range — using molecule centroid for seg 5.")
         cluster_center = centroid
 
-    # 6. AtomCentre empty (look-at target) + camera rig + sun light
-    target = bpy.data.objects.new("AtomCentre", None)
-    target.empty_display_type = "SPHERE"
-    target.empty_display_size  = 0.3
-    target.location = centroid
-    mol_col.objects.link(target)
+    # 6. Camera/target/light rig from optional setup file, else create from scratch
+    setup_blend_path = resolve_setup_blend_path(SETUP_BLEND_FILE)
+    if SETUP_BLEND_FILE and not setup_blend_path:
+        raise FileNotFoundError(
+            f"SETUP_BLEND_FILE not found: {SETUP_BLEND_FILE!r}. "
+            "Use absolute path or Blender-relative //path."
+        )
 
-    cam_data = bpy.data.cameras.new("MolCamera")
-    cam      = bpy.data.objects.new("MolCamera", cam_data)
-    mol_col.objects.link(cam)
-    bpy.context.scene.camera = cam
+    if setup_blend_path:
+        print(f"Setup rig: {setup_blend_path}")
+        cam, target, has_lights = load_setup_rig(setup_blend_path, mol_col)
+        bpy.context.scene.camera = cam
 
-    # Parent camera to AtomCentre so that cam.location is a LOCAL offset from the
-    # target.  Clearing the parent-inverse matrix keeps that offset clean.
-    cam.parent                 = target
-    cam.matrix_parent_inverse  = Matrix.Identity(4)
+        # Place look-at target on molecule centroid and drive camera in local space.
+        target.location = centroid
+        cam.parent = target
+        cam.matrix_parent_inverse = Matrix.Identity(4)
 
-    # Initial local position (matches seg-1 camera keyframe setup)
-    initial_cam_local, _ = get_initial_camera_local_offset(centroid)
-    cam.location = initial_cam_local
+        # Keep segment-1 start offset logic consistent with non-setup mode.
+        initial_cam_local, _ = get_initial_camera_local_offset(centroid)
+        cam.location = initial_cam_local
 
-    # TrackTo keeps the lens pointed at AtomCentre regardless of orbital distance
-    c = cam.constraints.new(type="TRACK_TO")
-    c.target     = target
-    c.track_axis = "TRACK_NEGATIVE_Z"
-    c.up_axis    = "UP_Y"
+        # Avoid stale keyframes from the setup file.
+        clear_object_animation(cam)
+        clear_object_animation(target)
 
-    extent          = max(abs(cx), abs(cy), abs(cz))
-    sun_data        = bpy.data.lights.new("MolSun", type="SUN")
-    sun_data.energy = 3.0
-    sun             = bpy.data.objects.new("MolSun", sun_data)
-    sun.location    = (cx, cy, cz + extent * 4.5)
-    mol_col.objects.link(sun)
+        if not has_lights:
+            print("WARNING: Setup file has no lights — creating default sun.")
+            extent          = max(abs(cx), abs(cy), abs(cz))
+            sun_data        = bpy.data.lights.new("MolSun", type="SUN")
+            sun_data.energy = 3.0
+            sun             = bpy.data.objects.new("MolSun", sun_data)
+            sun.location    = (cx, cy, cz + extent * 4.5)
+            mol_col.objects.link(sun)
+    else:
+        target = bpy.data.objects.new("AtomCentre", None)
+        target.empty_display_type = "SPHERE"
+        target.empty_display_size  = 0.3
+        target.location = centroid
+        mol_col.objects.link(target)
+
+        cam_data = bpy.data.cameras.new("MolCamera")
+        cam      = bpy.data.objects.new("MolCamera", cam_data)
+        mol_col.objects.link(cam)
+        bpy.context.scene.camera = cam
+
+        # Parent camera to AtomCentre so that cam.location is a LOCAL offset from the
+        # target. Clearing the parent-inverse matrix keeps that offset clean.
+        cam.parent                 = target
+        cam.matrix_parent_inverse  = Matrix.Identity(4)
+
+        # Initial local position (matches seg-1 camera keyframe setup)
+        initial_cam_local, _ = get_initial_camera_local_offset(centroid)
+        cam.location = initial_cam_local
+
+        # TrackTo keeps the lens pointed at AtomCentre regardless of orbital distance
+        c = cam.constraints.new(type="TRACK_TO")
+        c.target     = target
+        c.track_axis = "TRACK_NEGATIVE_Z"
+        c.up_axis    = "UP_Y"
+
+        extent          = max(abs(cx), abs(cy), abs(cz))
+        sun_data        = bpy.data.lights.new("MolSun", type="SUN")
+        sun_data.energy = 3.0
+        sun             = bpy.data.objects.new("MolSun", sun_data)
+        sun.location    = (cx, cy, cz + extent * 4.5)
+        mol_col.objects.link(sun)
 
     # 7. Parse DCD trajectory
     traj_path = resolve_path(TRAJ_FILE, "traj_nvt.dcd")
