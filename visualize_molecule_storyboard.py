@@ -81,6 +81,12 @@ SEG5_DCD_END   = 1550   # end of animation
 ZOOM_START_DCD = SEG2_DCD_START
 # Hide non-focus atoms at this frame and keep only H + 2F atoms visible.
 HIDE_OTHERS_DCD_START = SEG3_DCD_START
+# Fade duration (Blender frames) for non-focus atoms after HIDE_OTHERS_DCD_START.
+# 0 keeps the previous instant on/off behavior.
+FADE_OTHERS_FRAMES = 30
+# Fade duration (Blender frames) for cluster atoms to blend in at SEG5_DCD_START.
+# 0 keeps the previous instant pop-in behavior for seg 5.
+FADE_CLUSTER_IN_FRAMES = 30
 
 # ── Key atom indices (0-based, matching PDB ATOM/HETATM record order) ─────────
 # NOTE: PDB HETATM serial numbers are 1-based; subtract 1 to get 0-based index.
@@ -414,6 +420,25 @@ def make_material_with_color(mat_name, color_rgba):
     return mat
 
 
+def set_material_alpha(mat, alpha):
+    """Set material alpha (0..1) for fade transitions."""
+    if mat is None:
+        return
+
+    a = max(0.0, min(1.0, float(alpha)))
+    if not mat.use_nodes:
+        mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    if bsdf is not None and "Alpha" in bsdf.inputs:
+        bsdf.inputs["Alpha"].default_value = a
+
+    # Eevee viewport/render blending (safe no-op in engines that ignore these).
+    if hasattr(mat, "blend_method"):
+        mat.blend_method = "BLEND" if a < 0.999 else "OPAQUE"
+    if hasattr(mat, "shadow_method"):
+        mat.shadow_method = "HASHED" if a < 0.999 else "OPAQUE"
+
+
 def create_element_objects(element, positions, collection, object_name=None, material=None):
     """Build a vertex-instancer for one element. Returns (parent_obj, sphere_obj)."""
     import bmesh
@@ -711,7 +736,7 @@ def setup_camera_animation(cam, target, focus_pos, centroid, cluster_center):
 
 # ── Storyboard frame handler ──────────────────────────────────────────────────
 
-def register_storyboard_handler(coords, instancer_objects, instancer_index_map):
+def register_storyboard_handler(coords, instancer_objects, instancer_index_map, fade_object_names):
     """
     Register a frame_change_pre handler that drives the storyboard each frame.
 
@@ -721,6 +746,11 @@ def register_storyboard_handler(coords, instancer_objects, instancer_index_map):
       Seg 3 (DCD 1000–1150): TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX
       Seg 4 (DCD 1150–1350): TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX
       Seg 5 (DCD 1350–1550): FOCUS_INDICES (+ TRITIUM_IDX/F1/F2 guaranteed)
+
+    Fade behavior:
+      Non-focus objects fade from alpha 1 → 0 over FADE_OTHERS_FRAMES after
+      HIDE_OTHERS_DCD_START. During seg 5, cluster atoms blend in over
+      FADE_CLUSTER_IN_FRAMES.
     """
     n_traj = coords.shape[0]
 
@@ -733,6 +763,21 @@ def register_storyboard_handler(coords, instancer_objects, instancer_index_map):
     hide_others_bl = dcd_to_bl(HIDE_OTHERS_DCD_START)
     seg4_bl = dcd_to_bl(SEG4_DCD_START)
     seg5_bl = dcd_to_bl(SEG5_DCD_START)
+    seg5_end_bl = dcd_to_bl(SEG5_DCD_END)
+    fade_out_frames = max(int(FADE_OTHERS_FRAMES), 0)
+    fade_out_end_bl = min(hide_others_bl + fade_out_frames, seg5_bl)
+    fade_in_frames = max(int(FADE_CLUSTER_IN_FRAMES), 0)
+    fade_in_end_bl = min(seg5_bl + fade_in_frames, seg5_end_bl)
+
+    # Cache per-instancer material for fast alpha updates.
+    obj_materials = {}
+    for obj_name, obj in instancer_objects.items():
+        mat = None
+        for child in obj.children:
+            if child.type == "MESH" and child.data and child.data.materials:
+                mat = child.data.materials[0]
+                break
+        obj_materials[obj_name] = mat
 
     def update_frame(scene, depsgraph=None):
         bf        = scene.frame_current
@@ -740,6 +785,9 @@ def register_storyboard_handler(coords, instancer_objects, instancer_index_map):
 
         # Determine visibility mode for this frame
         if bf < hide_others_bl:
+            show_all = True
+            vis_idx  = None
+        elif bf < fade_out_end_bl:
             show_all = True
             vis_idx  = None
         else:
@@ -750,6 +798,26 @@ def register_storyboard_handler(coords, instancer_objects, instancer_index_map):
                 vis_idx = seg4_vis
             else:                  # seg 5
                 vis_idx = seg5_vis
+
+        # Fade non-focus objects during the hide transition.
+        if bf < hide_others_bl:
+            bulk_alpha = 1.0
+        elif bf < fade_out_end_bl and fade_out_end_bl > hide_others_bl:
+            t = (bf - hide_others_bl) / float(fade_out_end_bl - hide_others_bl)
+            bulk_alpha = 1.0 - max(0.0, min(1.0, t))
+        elif bf < seg5_bl:
+            bulk_alpha = 0.0
+        elif bf < fade_in_end_bl and fade_in_end_bl > seg5_bl:
+            t = (bf - seg5_bl) / float(fade_in_end_bl - seg5_bl)
+            bulk_alpha = max(0.0, min(1.0, t))
+        else:
+            bulk_alpha = 1.0
+
+        for obj_name, mat in obj_materials.items():
+            if obj_name in fade_object_names:
+                set_material_alpha(mat, bulk_alpha)
+            else:
+                set_material_alpha(mat, 1.0)
 
         # Update each instancer mesh from its own global atom index list
         for obj_name, obj in instancer_objects.items():
@@ -794,6 +862,10 @@ def main():
         raise ValueError("HIDE_OTHERS_DCD_START must be between SEG1_DCD_START and SEG5_DCD_END.")
     if ZOOM_START_DCD > HIDE_OTHERS_DCD_START:
         raise ValueError("ZOOM_START_DCD must be <= HIDE_OTHERS_DCD_START.")
+    if FADE_OTHERS_FRAMES < 0:
+        raise ValueError("FADE_OTHERS_FRAMES must be >= 0.")
+    if FADE_CLUSTER_IN_FRAMES < 0:
+        raise ValueError("FADE_CLUSTER_IN_FRAMES must be >= 0.")
 
     # 1. Clear scene
     bpy.ops.object.select_all(action="SELECT")
@@ -818,29 +890,59 @@ def main():
     mol_col = bpy.data.collections.new(col_name)
     bpy.context.scene.collection.children.link(mol_col)
 
-    # 4. Build instancer objects (one per element), with dedicated objects for
-    #    FLUORIDE_1_IDX and FLUORIDE_2_IDX so they can have distinct colors.
+    # 4. Build instancer objects.
+    #    - Bulk objects: all non-focus atoms (these will be faded during zoom).
+    #    - Focus objects: zoom-focus atoms, kept visible during fade.
+    #    - F_1/F_2 keep dedicated colors.
     element_global_indices = {}
     for g_idx, elem in enumerate(atom_order):
         element_global_indices.setdefault(elem, []).append(g_idx)
 
     instancer_objects = {}
     instancer_index_map = {}
+    focus_object_names = set()
+
+    zoom_focus_raw = get_zoom_focus_indices()
+    zoom_focus_set = {i for i in zoom_focus_raw if 0 <= i < len(atom_order)}
+    invalid_zoom_focus = [i for i in zoom_focus_raw if not (0 <= i < len(atom_order))]
+    if invalid_zoom_focus:
+        print(f"WARNING: Ignoring out-of-range zoom-focus indices: {invalid_zoom_focus}")
+
+    special_f = {FLUORIDE_1_IDX, FLUORIDE_2_IDX}
+
+    # Dedicated single-atom objects for zoom-focus atoms (except F_1/F_2,
+    # which get custom colors below).
+    for idx in sorted(zoom_focus_set):
+        if idx in special_f:
+            continue
+        elem = atom_order[idx]
+        obj_name = f"Focus_{idx}_{elem}"
+        focus_color = ATOM_COLORS.get(elem, DEFAULT_COLOR)
+        focus_mat = make_material_with_color(f"Atom_{obj_name}", focus_color)
+        parent_obj, _ = create_element_objects(
+            elem, [flat_positions[idx]], mol_col, object_name=obj_name, material=focus_mat
+        )
+        instancer_objects[obj_name] = parent_obj
+        instancer_index_map[obj_name] = np.array([idx], dtype=np.int32)
+        focus_object_names.add(obj_name)
+        print(f"  Instancer: {obj_name} (focus index {idx})")
 
     for element in sorted(element_global_indices.keys()):
         g_idxs = element_global_indices[element]
 
         if element != "F":
-            positions = [flat_positions[i] for i in g_idxs]
+            bulk_idxs = [i for i in g_idxs if i not in zoom_focus_set]
+            if not bulk_idxs:
+                continue
+            positions = [flat_positions[i] for i in bulk_idxs]
             parent_obj, _ = create_element_objects(element, positions, mol_col, object_name=element)
             instancer_objects[element] = parent_obj
-            instancer_index_map[element] = np.array(g_idxs, dtype=np.int32)
-            print(f"  Instancer: {element} ({len(g_idxs)} atoms)")
+            instancer_index_map[element] = np.array(bulk_idxs, dtype=np.int32)
+            print(f"  Instancer: {element} ({len(bulk_idxs)} atoms)")
             continue
 
         # Split fluorine into bulk + two singled-out fluorides.
-        special_f = {FLUORIDE_1_IDX, FLUORIDE_2_IDX}
-        f_bulk_idxs = [i for i in g_idxs if i not in special_f]
+        f_bulk_idxs = [i for i in g_idxs if i not in special_f and i not in zoom_focus_set]
 
         if f_bulk_idxs:
             positions = [flat_positions[i] for i in f_bulk_idxs]
@@ -858,6 +960,7 @@ def main():
             )
             instancer_objects["F_1"] = parent_obj
             instancer_index_map["F_1"] = np.array([FLUORIDE_1_IDX], dtype=np.int32)
+            focus_object_names.add("F_1")
             print(f"  Instancer: F_1 (index {FLUORIDE_1_IDX})")
         else:
             print(f"WARNING: FLUORIDE_1_IDX {FLUORIDE_1_IDX} is not a fluorine atom in this PDB.")
@@ -871,9 +974,12 @@ def main():
             )
             instancer_objects["F_2"] = parent_obj
             instancer_index_map["F_2"] = np.array([FLUORIDE_2_IDX], dtype=np.int32)
+            focus_object_names.add("F_2")
             print(f"  Instancer: F_2 (index {FLUORIDE_2_IDX})")
         else:
             print(f"WARNING: FLUORIDE_2_IDX {FLUORIDE_2_IDX} is not a fluorine atom in this PDB.")
+
+    fade_object_names = set(instancer_objects.keys()) - focus_object_names
 
     # 5. Compute molecule centroid and zoom-focus position (from static PDB)
     n_atoms  = len(flat_positions)
@@ -979,7 +1085,7 @@ def main():
           f"(DCD frames {SEG1_DCD_START}–{SEG5_DCD_END})")
 
     # 10. Register storyboard frame handler
-    register_storyboard_handler(coords, instancer_objects, instancer_index_map)
+    register_storyboard_handler(coords, instancer_objects, instancer_index_map, fade_object_names)
 
     # 11. Switch viewport to Material Preview (GUI only)
     if bpy.context.screen is not None:

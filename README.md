@@ -46,6 +46,24 @@ SETUP_EMPTY_NAME  = ""               # optional explicit empty object name
 Then run the script. It will append camera/empty/lights from that setup file and reuse them.
 If no lights are found in the setup file, the script falls back to auto 3-point lights.
 
+### Transition fade controls (zoom to F,F,H and cluster)
+
+In `visualize_molecule_storyboard.py`, these knobs control the zoom/visibility transition:
+
+```python
+ZOOM_START_DCD = SEG2_DCD_START
+HIDE_OTHERS_DCD_START = SEG3_DCD_START
+FADE_OTHERS_FRAMES = 30
+FADE_CLUSTER_IN_FRAMES = 30
+```
+
+- `HIDE_OTHERS_DCD_START`: frame where non-focus atoms begin to fade out.
+- `FADE_OTHERS_FRAMES`: number of Blender frames for non-focus fade-out (`0` = instant hide).
+- `SEG5_DCD_START`: cluster phase begins.
+- `FADE_CLUSTER_IN_FRAMES`: number of Blender frames for cluster fade-in during seg 5 (`0` = instant pop-in).
+
+The focus trio (tritium + `F_1` + `F_2`) stays visible while the box fades out and while the cluster blends in.
+
 ### Command-line example
 
 ```bash
