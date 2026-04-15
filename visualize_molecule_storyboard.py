@@ -432,11 +432,44 @@ def set_material_alpha(mat, alpha):
     if bsdf is not None and "Alpha" in bsdf.inputs:
         bsdf.inputs["Alpha"].default_value = a
 
-    # Eevee viewport/render blending (safe no-op in engines that ignore these).
+    # Eevee: avoid BLEND sorting artifacts on many overlapping transparent spheres.
+    # Prefer dithered/hashed-style transparency during fades.
+    fading = (a < 0.999)
+
     if hasattr(mat, "blend_method"):
-        mat.blend_method = "BLEND" if a < 0.999 else "OPAQUE"
+        try:
+            mat.blend_method = "HASHED" if fading else "OPAQUE"
+        except Exception:
+            # Fallback for Blender builds that do not expose HASHED here.
+            try:
+                mat.blend_method = "BLEND" if fading else "OPAQUE"
+            except Exception:
+                pass
+
+    # Blender 4.x Eevee Next path (when available).
+    if hasattr(mat, "surface_render_method"):
+        try:
+            mat.surface_render_method = "DITHERED" if fading else "OPAQUE"
+        except Exception:
+            pass
+
     if hasattr(mat, "shadow_method"):
-        mat.shadow_method = "HASHED" if a < 0.999 else "OPAQUE"
+        try:
+            mat.shadow_method = "HASHED" if fading else "OPAQUE"
+        except Exception:
+            pass
+
+    if hasattr(mat, "use_transparent_shadow"):
+        try:
+            mat.use_transparent_shadow = fading
+        except Exception:
+            pass
+
+    if hasattr(mat, "show_transparent_back"):
+        try:
+            mat.show_transparent_back = not fading
+        except Exception:
+            pass
 
 
 def create_element_objects(element, positions, collection, object_name=None, material=None):

@@ -64,10 +64,43 @@ FADE_CLUSTER_IN_FRAMES = 30
 
 The focus trio (tritium + `F_1` + `F_2`) stays visible while the box fades out and while the cluster blends in.
 
-### Command-line example
+### Command-line render (full movie)
 
 ```bash
+cd /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/FLIBE
+mkdir -p output
+
 /Applications/Blender.app/Contents/MacOS/Blender \
+  -b --factory-startup \
+  -P /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/FLIBE/visualize_molecule_storyboard.py \
+  --python-expr "import bpy; bpy.context.scene.render.resolution_percentage=50" \
+  -o /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/FLIBE/output/frame_##### \
+  -F PNG -x 1 \
+  -a
+```
+
+This renders the full storyboard range set in the script (`SEG1_DCD_START` to `SEG5_DCD_END`).
+
+### Command-line render (subrange / frame skip)
+
+Add `-s`, `-e`, and `-j` before `-a`:
+
+```bash
+blender \
+  -b --factory-startup \
+  -P /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/FLIBE/visualize_molecule_storyboard.py \
+  --python-expr "import bpy; bpy.context.scene.render.resolution_percentage=50" \
+  -o /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/nvt_630_TF_large/output/frame_##### \
+  -F PNG -x 1 \
+  -a
+```
+
+`-j 2` renders every other frame.
+
+### Minimal command-line example
+
+```bash
+blender \
   -b --factory-startup \
   -P /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/FLIBE/visualize_molecule_storyboard.py \
   -a
