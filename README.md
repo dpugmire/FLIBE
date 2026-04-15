@@ -105,3 +105,62 @@ blender \
   -P /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/FLIBE/visualize_molecule_storyboard.py \
   -a
 ```
+
+## Transparent label overlays
+
+Use `make_label_overlays.py` to generate transparent PNG overlays with:
+
+- Right-side labels in order: `F`, `T`, `Be`, `Li`
+- Label colors matched to atom colors
+- `Be`/`Li` fade out during zoom focus transition
+- `Be`/`Li` fade back in during cluster fade-in
+- Bottom-center white text: `Single Cluster` (fades in with cluster)
+
+### Generate overlay PNG sequence
+
+Install Pillow once:
+
+```bash
+python3 -m pip install pillow
+```
+
+Generate overlays for rendered frames:
+
+```bash
+python3 /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/FLIBE/make_label_overlays.py \
+  --frames-dir /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/nvt_630_TF_large/output \
+  --output-dir /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/nvt_630_TF_large/output/labels \
+  --storyboard-script /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/FLIBE/visualize_molecule_storyboard.py
+```
+
+By default, the overlay script auto-loads timing constants from
+`visualize_molecule_storyboard.py` and prints the resolved fade frame ranges.
+You can still override any timing directly from CLI.
+
+Timing constants used:
+
+- `HIDE_OTHERS_DCD_START = 1000`
+- `FADE_OTHERS_FRAMES = 30`
+- `SEG5_DCD_START = 1350`
+- `FADE_CLUSTER_IN_FRAMES = 30`
+- `DCD_FRAME_OFFSET = 700`
+
+You can override timings with:
+`--dcd-offset`, `--hide-others-dcd-start`, `--fade-others-frames`,
+`--seg5-dcd-start`, and `--fade-cluster-in-frames`.
+
+If your frame filenames were renumbered and no longer match Blender frame numbers,
+use `--frame-index-offset` so label fades line up with atom fades.
+
+### Composite overlays over rendered frames
+
+```bash
+ffmpeg \
+  -framerate 30 -start_number 1 \
+  -i /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/nvt_630_TF_large/output/frame_%05d.png \
+  -framerate 30 -start_number 1 \
+  -i /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/nvt_630_TF_large/output/labels/labels_%05d.png \
+  -filter_complex "[0:v][1:v]overlay=0:0:format=auto:shortest=1" \
+  -c:v libx264 -pix_fmt yuv420p \
+  /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/nvt_630_TF_large/output/movie_with_labels.mp4
+```
