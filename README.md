@@ -6,11 +6,44 @@ Blender Python scripts for molecular visualization and storyboard rendering.
 
 - `visualize_molecule.py`
 - `visualize_molecule_storyboard.py`
+- `visualize_molecule_storyboard_tritium_cluster.py`
 - `register_handler.py`
 
 ## Notes
 
 Large trajectory/data/render artifacts are excluded from version control via `.gitignore`.
+
+## Running `visualize_molecule_storyboard_tritium_cluster.py`
+
+`visualize_molecule_storyboard_tritium_cluster.py` is a dedicated storyboard for:
+
+1. all atoms + zoom toward tritium
+2. tritium-only progression
+3. zoom-out before sphere
+4. sphere fade-in
+5. cluster fade-in
+6. sphere fade-out
+7. cluster-only progression
+
+Key defaults and knobs are in the script header:
+
+- Trajectory window: `STORY_DCD_START`, `STORY_DCD_STEPS`
+- Phase timing: `PHASE1_...` through `PHASE6_...`
+- Camera distances: `CAM_DIST_ALL_ATOMS`, `CAM_DIST_TRITIUM`, `CAM_DIST_SPHERE`, `CAM_DIST_CLUSTER`
+- Sphere style: `SPHERE_RADIUS_ANGSTROM`, `SPHERE_COLOR`, `SPHERE_FINAL_ALPHA`
+
+Notes:
+
+- `TRITIUM_IDX = 1680`
+- Cluster atoms come from `FOCUS_INDICES`
+- The reference sphere is centered on the target empty (`AtomCentre`)
+- If `TRAJ_FILE` is blank, the script looks for `traj_nvt_interp.dcd`
+
+Minimal run:
+
+```bash
+blender --python /Users/dpn/proj/flibe/OneDrive_1_4-9-2026/FLIBE/visualize_molecule_storyboard_tritium_cluster.py
+```
 
 ## Running `visualize_molecule_storyboard.py`
 

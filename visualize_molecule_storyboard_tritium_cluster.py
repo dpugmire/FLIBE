@@ -7,16 +7,14 @@ Run inside Blender via the Scripting workspace:
   3. Adjust the USER-CONFIGURABLE SETTINGS block below
   4. Click "Run Script"
 
-Frame mapping
-  Blender frame 1  =  DCD frame DCD_FRAME_OFFSET (default 700).
-  The Blender timeline spans DCD frames DCD_FRAME_OFFSET through SEG5_DCD_END.
-
-Storyboard (boundaries given as DCD frame numbers):
-  Seg 1  DCD  700– 900 : all atoms, animated
-  Seg 2  DCD  900–1000 : start zoom/pan toward H + 2F focus group
-  Seg 3  DCD 1000–1150 : close-up on H + 2F
-  Seg 4  DCD 1150–1350 : continue close-up
-  Seg 5  DCD 1350–1550 : animate user-defined FOCUS_INDICES list
+Storyboard (all timings are DCD frame numbers):
+  Phase 1  all atoms, animate + zoom to tritium while fading non-tritium out
+  Phase 2  tritium only
+  Phase 3  tritium only + zoom out to fit reference sphere
+  Phase 4  tritium only + fade in fixed-centre reference sphere
+  Phase 5  fade in cluster atoms
+  Phase 6  fade out reference sphere
+  Phase 7  cluster atoms only
 """
 
 import bpy
@@ -34,12 +32,12 @@ from mathutils import Vector, Matrix
 # ── File paths ────────────────────────────────────────────────────────────────
 # Leave as "" to auto-detect files next to the saved .blend file.
 PDB_FILE  = ""   # e.g. "/home/user/sim/structure.pdb"
-#TRAJ_FILE = "traj_nvt_interp.dcd"   # e.g. "/home/user/sim/traj_nvt.dcd"
 TRAJ_FILE = ""
+DEFAULT_TRAJ_FILENAME = "traj_nvt_interp.dcd"
 
 # Optional setup .blend containing camera, empty, track-to constraint, and lights.
 # If left empty, the script creates a default camera/empty/light rig from scratch.
-SETUP_BLEND_FILE  = "//setup.blend"   # e.g. "//setup_base.blend" or "/abs/path/setup_base.blend"
+SETUP_BLEND_FILE  = ""   # e.g. "//setup_base.blend" or "/abs/path/setup_base.blend"
 SETUP_CAMERA_NAME = ""   # optional exact camera object name in setup file
 SETUP_EMPTY_NAME  = ""   # optional exact empty target object name in setup file
 
@@ -65,44 +63,30 @@ FRAME_STEP = 1
 #   "spline"  → Catmull-Rom cubic spline interpolation
 INTERP_MODE = "linear"
 
+# ── Story timing (DCD frames) ─────────────────────────────────────────────────
+# Requested timeline window: start at DCD frame 800 and use 600 DCD steps.
+STORY_DCD_START = 800
+STORY_DCD_STEPS = 600
+
+# Phase durations (all in DCD frames). Their sum must be <= STORY_DCD_STEPS.
+# Remaining frames are assigned to the final cluster-only hold phase.
+PHASE1_ZOOM_AND_FADE_DCD_FRAMES = 200  # all atoms visible, non-tritium fades out
+PHASE2_TRITIUM_ONLY_DCD_FRAMES  = 120  # tritium-only hold
+PHASE3_ZOOM_OUT_DCD_FRAMES = 100       # KNOB: increase to delay sphere fade-in start
+PHASE4_SPHERE_FADE_IN_DCD_FRAMES = 60  # sphere alpha 0 -> SPHERE_FINAL_ALPHA
+PHASE5_CLUSTER_BLEND_DCD_FRAMES = 60   # cluster atoms alpha 0->1
+PHASE6_SPHERE_FADE_OUT_DCD_FRAMES = 40 # sphere alpha SPHERE_FINAL_ALPHA -> 0
+
 # ── DCD ↔ Blender frame mapping ───────────────────────────────────────────────
 # Blender frame 1 corresponds to this DCD frame number.
-DCD_FRAME_OFFSET = 700
-
-# ── Storyboard segment boundaries (DCD frame numbers) ────────────────────────
-SEG1_DCD_START = 700    # Seg 1 begins: show all atoms
-SEG2_DCD_START = 800    # Seg 2 begins: zoom → tritium + F_1 + F_2
-SEG3_DCD_START = 1000   # Seg 3 begins: animate tritium + F_1 + F_2
-SEG4_DCD_START = 1150   # Seg 4 begins: continue tritium + F_1 + F_2
-SEG5_DCD_START = 1350   # Seg 5 begins: animate FOCUS_INDICES
-SEG5_DCD_END   = 1550   # end of animation
-
-# ── Zoom / visibility timing controls (DCD frame numbers) ─────────────────────
-# Start camera zoom/pan at this frame (all atoms can still be visible here).
-ZOOM_START_DCD = SEG2_DCD_START
-# Hide non-focus atoms at this frame and keep only H + 2F atoms visible.
-HIDE_OTHERS_DCD_START = SEG3_DCD_START
-# Fade duration (Blender frames) for non-focus atoms after HIDE_OTHERS_DCD_START.
-# 0 keeps the previous instant on/off behavior.
-FADE_OTHERS_FRAMES = 30
-# Fade duration (Blender frames) for cluster atoms to blend in at SEG5_DCD_START.
-# 0 keeps the previous instant pop-in behavior for seg 5.
-FADE_CLUSTER_IN_FRAMES = 30
+DCD_FRAME_OFFSET = STORY_DCD_START
 
 # ── Key atom indices (0-based, matching PDB ATOM/HETATM record order) ─────────
 # NOTE: PDB HETATM serial numbers are 1-based; subtract 1 to get 0-based index.
 #   e.g. PDB serial 1681 (TR1/Tritium)  → index 1680
-#        PDB serial 1682 (F5/Fluoride)  → index 1681
-#        PDB serial 86   (F/Fluoride)   → index 85
-TRITIUM_IDX    = 1680
-FLUORIDE_1_IDX = 86
-FLUORIDE_2_IDX = 856
+TRITIUM_IDX = 1680
 
-# ── Zoom-focus atom list (H + 2F by default) ──────────────────────────────────
-# The script guarantees TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX are included.
-ZOOM_FOCUS_INDICES = [TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX]
-
-# ── Segment-5 focus atom list ─────────────────────────────────────────────────
+# ── Cluster atom list ─────────────────────────────────────────────────────────
 # Replace these with your actual indices (0-based). Any number of indices is fine.
 FOCUS_INDICES = [
     1259, 552, 1006, 1273, 89, 1434, 1159, 592, 1551, 588, 589, 590,
@@ -117,7 +101,7 @@ FOCUS_INDICES = [
 
 # Optional explicit initial camera position at segment start (Blender units).
 # If set, this XYZ defines the viewing direction (camera ray) from AtomCentre.
-# Segment-1/2/3/4/5 distances are still controlled by CAM_DIST_SEG1..SEG5.
+# Storyboard distances are controlled by CAM_DIST_ALL_ATOMS/TRITIUM/SPHERE/CLUSTER.
 # In other words, CAM_INITIAL_XYZ chooses "where from", CAM_DIST_* chooses
 # "how far".
 # CAM_INITIAL_SPACE controls whether coordinates are read in AtomCentre local
@@ -127,19 +111,23 @@ FOCUS_INDICES = [
 CAM_INITIAL_XYZ   = (-3.7, -9.4, 2.3) # tuned left/up view angle
 CAM_INITIAL_SPACE = "WORLD"           # "WORLD" or "LOCAL"
 
-# Distance (Blender units; 1 BU = 10 Å) from AtomCentre for each segment.
+# Distance (Blender units; 1 BU = 10 Å) from AtomCentre.
 # Larger = further away / more zoomed out.
-CAM_DIST_SEG1 = 10.0   # Seg 1: wide shot — all atoms
-CAM_DIST_SEG2 = 10.0   # At ZOOM_START_DCD: start zoom/pan toward H + 2F focus
-CAM_DIST_SEG3 =  2.0   # Seg 3: close-up — H + two fluorides
-CAM_DIST_SEG4 =  2.0   # Seg 4: same close-up — H + two fluorides
-CAM_DIST_SEG5 =  4.0 #8.0   # Seg 5: backed off — focus cluster
+CAM_DIST_ALL_ATOMS = 10.0  # phase 1 start (wide shot)
+CAM_DIST_TRITIUM   = 2.0   # zoomed-in tritium view
+CAM_DIST_SPHERE    = 5.0   # zoomed-out distance before sphere fade-in
+CAM_DIST_CLUSTER   = 5.0   # cluster view after blend-in
 
 # ── Display ───────────────────────────────────────────────────────────────────
 SCALE = 0.1          # Å → Blender units  (1 Å = 0.1 BU)
 
-SPHERE_SEGMENTS = 32   # longitude divisions (higher = smoother spheres)
-SPHERE_RINGS    = 16   # latitude divisions
+SPHERE_SEGMENTS = 64   # longitude divisions (higher = smoother spheres)
+SPHERE_RINGS    = 32   # latitude divisions
+
+# Static reference sphere (centered at the target empty).
+SPHERE_RADIUS_ANGSTROM = 7.0
+SPHERE_COLOR = (0.82, 0.82, 0.82, 1.0)  # light gray
+SPHERE_FINAL_ALPHA = 0.5                # 50% transparent
 
 # ── Atom radii (Å) — van der Waals defaults ───────────────────────────────────
 ATOM_RADII = {
@@ -177,11 +165,6 @@ ATOM_COLORS = {
     "Ca" : (0.239, 1.000, 0.000, 1.0),
 }
 DEFAULT_COLOR = (0.800, 0.800, 0.800, 1.0)
-
-# Optional custom colors for the two highlighted fluorides.
-# Set to None to fall back to the default fluorine color from ATOM_COLORS["F"].
-FLUORIDE_1_COLOR = (0.565, 0.878, 0.314, 1.0)
-FLUORIDE_2_COLOR = (0.365, 0.820, 0.560, 1.0)
 
 
 # ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -249,32 +232,51 @@ def get_interpolated_coords(coords, bl_frame):
     raise ValueError(f'INTERP_MODE must be "nearest", "linear", or "spline" (got {INTERP_MODE!r}).')
 
 
-def get_zoom_focus_indices():
+def get_cluster_focus_indices():
     """
-    Zoom-focus atom list, guaranteed to include tritium + both fluorides.
+    Cluster atom list, guaranteed to include TRITIUM_IDX.
 
-    Preserves user-provided ZOOM_FOCUS_INDICES order and appends missing
-    required indices at the end.
+    Preserves user-provided FOCUS_INDICES order and appends TRITIUM_IDX if
+    missing.
     """
-    zoom_indices = list(ZOOM_FOCUS_INDICES)
-    for required_idx in (TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX):
-        if required_idx not in zoom_indices:
-            zoom_indices.append(required_idx)
-    return zoom_indices
+    cluster_indices = list(FOCUS_INDICES)
+    if TRITIUM_IDX not in cluster_indices:
+        cluster_indices.append(TRITIUM_IDX)
+    return cluster_indices
 
 
-def get_seg5_focus_indices():
+def get_story_dcd_boundaries():
     """
-    Segment-5 atom list, guaranteed to include tritium + both fluorides.
+    Return storyboard boundary frames in DCD units.
 
-    Preserves user-provided FOCUS_INDICES order and appends missing required
-    indices at the end.
+    Keys:
+      start
+      zoom_fade_end
+      tritium_only_end
+      zoom_out_end
+      sphere_fade_in_end
+      cluster_blend_end
+      sphere_fade_out_end
+      end
     """
-    seg5_indices = list(FOCUS_INDICES)
-    for required_idx in (TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX):
-        if required_idx not in seg5_indices:
-            seg5_indices.append(required_idx)
-    return seg5_indices
+    start = int(STORY_DCD_START)
+    end = start + int(STORY_DCD_STEPS)
+    zoom_fade_end = start + int(PHASE1_ZOOM_AND_FADE_DCD_FRAMES)
+    tritium_only_end = zoom_fade_end + int(PHASE2_TRITIUM_ONLY_DCD_FRAMES)
+    zoom_out_end = tritium_only_end + int(PHASE3_ZOOM_OUT_DCD_FRAMES)
+    sphere_fade_in_end = zoom_out_end + int(PHASE4_SPHERE_FADE_IN_DCD_FRAMES)
+    cluster_blend_end = sphere_fade_in_end + int(PHASE5_CLUSTER_BLEND_DCD_FRAMES)
+    sphere_fade_out_end = cluster_blend_end + int(PHASE6_SPHERE_FADE_OUT_DCD_FRAMES)
+    return {
+        "start": start,
+        "zoom_fade_end": zoom_fade_end,
+        "tritium_only_end": tritium_only_end,
+        "zoom_out_end": zoom_out_end,
+        "sphere_fade_in_end": sphere_fade_in_end,
+        "cluster_blend_end": cluster_blend_end,
+        "sphere_fade_out_end": sphere_fade_out_end,
+        "end": end,
+    }
 
 
 # ── I/O ───────────────────────────────────────────────────────────────────────
@@ -353,7 +355,6 @@ def parse_dcd(filepath, frame_step=1):
         f.read(4)
         return data, size
 
-    print('***** filepath= ', filepath)
     with open(filepath, "rb") as f:
         hdr, _         = read_fortran_record(f)
         n_frames       = struct.unpack_from("i", hdr, 4)[0]
@@ -521,6 +522,41 @@ def create_element_objects(element, positions, collection, object_name=None, mat
     return parent_obj, sphere_obj
 
 
+def create_reference_sphere(collection, center_empty):
+    """Create a semi-transparent reference sphere centered on the given empty."""
+    import bmesh
+
+    mesh = bpy.data.meshes.new("TritiumReferenceSphere")
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(
+        bm,
+        u_segments=SPHERE_SEGMENTS,
+        v_segments=SPHERE_RINGS,
+        radius=SPHERE_RADIUS_ANGSTROM * SCALE,
+    )
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
+    if hasattr(mesh, "use_auto_smooth"):
+        mesh.use_auto_smooth = True
+        mesh.auto_smooth_angle = math.radians(180)
+    mesh.update()
+
+    sphere_obj = bpy.data.objects.new("TritiumReferenceSphere", mesh)
+    sphere_obj.parent = center_empty
+    sphere_obj.matrix_parent_inverse = Matrix.Identity(4)
+    sphere_obj.location = Vector((0.0, 0.0, 0.0))
+    collection.objects.link(sphere_obj)
+
+    sphere_mat = make_material_with_color("Atom_TritiumReferenceSphere", SPHERE_COLOR)
+    if sphere_obj.data.materials:
+        sphere_obj.data.materials[0] = sphere_mat
+    else:
+        sphere_obj.data.materials.append(sphere_mat)
+    set_material_alpha(sphere_mat, 0.0)
+    return sphere_obj, sphere_mat
+
+
 def load_setup_rig(setup_blend_path, collection):
     """
     Append camera/empty/light objects from a setup .blend and return (camera, target, has_lights).
@@ -678,7 +714,7 @@ def get_initial_camera_local_offset(target_world):
     if CAM_INITIAL_XYZ is None:
         # Backward-compatible default view direction if no explicit XYZ is given.
         fallback_dir = Vector((1.0, -1.0, 0.7)).normalized()
-        return fallback_dir * CAM_DIST_SEG1, fallback_dir
+        return fallback_dir * CAM_DIST_ALL_ATOMS, fallback_dir
 
     if len(CAM_INITIAL_XYZ) != 3:
         raise ValueError("CAM_INITIAL_XYZ must be a 3-value tuple/list or None.")
@@ -696,113 +732,89 @@ def get_initial_camera_local_offset(target_world):
         raise ValueError("CAM_INITIAL_XYZ cannot be at AtomCentre (zero camera-target distance).")
 
     cam_dir = local_offset.normalized()
-    return cam_dir * CAM_DIST_SEG1, cam_dir
+    return cam_dir * CAM_DIST_ALL_ATOMS, cam_dir
 
 
-def setup_camera_animation(cam, target, focus_pos, centroid, cluster_center):
+def setup_camera_animation(cam, target, centroid, tritium_anchor, cluster_center, story_dcd):
     """
     Set up the camera rig and keyframe the storyboard animation.
-
-    Camera rig
-    ----------
-    The camera is parented to AtomCentre (target). Its LOCAL location uses the
-    direction implied by the initial camera offset, scaled by per-segment
-    distances, so zooming does not depend on a separate direction setting.
-    A TrackTo constraint keeps the lens pointed at the target regardless of
-    where in the scene the target sits.
-
-    Animation overview
-    ------------------
-    target.location keyframes move the look-at point:
-        Seg 1–2  →  molecule centroid      (wide overview)
-        Seg 3–4  →  zoom-focus centroid    (H + 2F close-up)
-        Seg 5    →  cluster centroid    (focus group)
-
-    cam.location keyframes (LOCAL space) change the orbital distance:
-        Seg 1–2  →  CAM_DIST_SEG1 / CAM_DIST_SEG2   (wide to zoom start)
-        Seg 3–4  →  CAM_DIST_SEG3 / CAM_DIST_SEG4   (close)
-        Seg 5    →  CAM_DIST_SEG5                    (mid)
-
-    Both sets of keyframes use Bezier interpolation for smooth motion.
     """
-    seg1_local, cam_dir = get_initial_camera_local_offset(centroid)
+    cam_start_local, cam_dir = get_initial_camera_local_offset(centroid)
 
-    seg1_bl     = dcd_to_bl(SEG1_DCD_START)
-    zoom_start_bl = dcd_to_bl(ZOOM_START_DCD)
-    seg3_bl     = dcd_to_bl(SEG3_DCD_START)
-    seg5_bl     = dcd_to_bl(SEG5_DCD_START)
-    seg5_end_bl = dcd_to_bl(SEG5_DCD_END)
+    start_bl = dcd_to_bl(story_dcd["start"])
+    zoom_fade_end_bl = dcd_to_bl(story_dcd["zoom_fade_end"])
+    tritium_only_end_bl = dcd_to_bl(story_dcd["tritium_only_end"])
+    zoom_out_end_bl = dcd_to_bl(story_dcd["zoom_out_end"])
+    sphere_fade_in_end_bl = dcd_to_bl(story_dcd["sphere_fade_in_end"])
+    cluster_blend_end_bl = dcd_to_bl(story_dcd["cluster_blend_end"])
+    sphere_fade_out_end_bl = dcd_to_bl(story_dcd["sphere_fade_out_end"])
+    end_bl = dcd_to_bl(story_dcd["end"])
 
-    # ── Camera LOCAL location keyframes (distance from target) ────────────────
-    # Because the camera is parented to target, cam.location is in LOCAL space,
-    # so these keyframes purely control distance — world position follows target.
+    # Camera LOCAL location keyframes (distance from target)
+    cam.location = cam_start_local
+    cam.keyframe_insert(data_path="location", frame=start_bl)
+    cam.location = cam_dir * CAM_DIST_TRITIUM
+    cam.keyframe_insert(data_path="location", frame=zoom_fade_end_bl)
+    cam.location = cam_dir * CAM_DIST_TRITIUM
+    cam.keyframe_insert(data_path="location", frame=tritium_only_end_bl)
+    cam.location = cam_dir * CAM_DIST_SPHERE
+    cam.keyframe_insert(data_path="location", frame=zoom_out_end_bl)
+    cam.location = cam_dir * CAM_DIST_SPHERE
+    cam.keyframe_insert(data_path="location", frame=sphere_fade_in_end_bl)
+    cam.location = cam_dir * CAM_DIST_CLUSTER
+    cam.keyframe_insert(data_path="location", frame=cluster_blend_end_bl)
+    cam.location = cam_dir * CAM_DIST_CLUSTER
+    cam.keyframe_insert(data_path="location", frame=sphere_fade_out_end_bl)
+    cam.location = cam_dir * CAM_DIST_CLUSTER
+    cam.keyframe_insert(data_path="location", frame=end_bl)
 
-    cam.location = seg1_local
-    cam.keyframe_insert(data_path="location", frame=seg1_bl)
-
-    cam.location = cam_dir * CAM_DIST_SEG2
-    cam.keyframe_insert(data_path="location", frame=zoom_start_bl)   # transition starts
-
-    cam.location = cam_dir * CAM_DIST_SEG3
-    cam.keyframe_insert(data_path="location", frame=seg3_bl)   # zoomed in
-
-    cam.location = cam_dir * CAM_DIST_SEG4
-    cam.keyframe_insert(data_path="location", frame=seg5_bl)   # hold through seg 4
-
-    cam.location = cam_dir * CAM_DIST_SEG5
-    cam.keyframe_insert(data_path="location", frame=seg5_end_bl)  # backed off for cluster
-
-    # ── Target WORLD location keyframes (pan / look-at point) ─────────────────
+    # Target WORLD location keyframes (look-at point)
     target.location = centroid
-    target.keyframe_insert(data_path="location", frame=seg1_bl)
-    target.keyframe_insert(data_path="location", frame=zoom_start_bl)   # hold at centroid
-
-    target.location = focus_pos
-    target.keyframe_insert(data_path="location", frame=seg3_bl)   # pan to zoom-focus group
-    target.keyframe_insert(data_path="location", frame=seg5_bl)   # hold through seg 4
-
+    target.keyframe_insert(data_path="location", frame=start_bl)
+    target.location = tritium_anchor
+    target.keyframe_insert(data_path="location", frame=zoom_fade_end_bl)
+    target.location = tritium_anchor
+    target.keyframe_insert(data_path="location", frame=tritium_only_end_bl)
+    target.location = tritium_anchor
+    target.keyframe_insert(data_path="location", frame=zoom_out_end_bl)
+    target.location = tritium_anchor
+    target.keyframe_insert(data_path="location", frame=sphere_fade_in_end_bl)
     target.location = cluster_center
-    target.keyframe_insert(data_path="location", frame=seg5_end_bl)  # pan to cluster
+    target.keyframe_insert(data_path="location", frame=cluster_blend_end_bl)
+    target.location = cluster_center
+    target.keyframe_insert(data_path="location", frame=sphere_fade_out_end_bl)
+    target.location = cluster_center
+    target.keyframe_insert(data_path="location", frame=end_bl)
 
-    # ── Smooth Bezier interpolation on all keyframes ──────────────────────────
+    # Smooth Bezier interpolation on all keyframes
     set_bezier(cam)
     set_bezier(target)
 
 
 # ── Storyboard frame handler ──────────────────────────────────────────────────
 
-def register_storyboard_handler(coords, instancer_objects, instancer_index_map, fade_object_names):
+def register_storyboard_handler(
+    coords,
+    instancer_objects,
+    instancer_index_map,
+    bulk_object_names,
+    sphere_material,
+    story_dcd,
+):
     """
     Register a frame_change_pre handler that drives the storyboard each frame.
-
-    Atom visibility by segment:
-      Seg 1 (DCD 700– 900) : all atoms
-      Seg 2 (DCD 900–1000) : all atoms (zoom can already be in progress)
-      Seg 3 (DCD 1000–1150): TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX
-      Seg 4 (DCD 1150–1350): TRITIUM_IDX, FLUORIDE_1_IDX, FLUORIDE_2_IDX
-      Seg 5 (DCD 1350–1550): FOCUS_INDICES (+ TRITIUM_IDX/F1/F2 guaranteed)
-
-    Fade behavior:
-      Non-focus objects fade from alpha 1 → 0 over FADE_OTHERS_FRAMES after
-      HIDE_OTHERS_DCD_START. During seg 5, cluster atoms blend in over
-      FADE_CLUSTER_IN_FRAMES.
     """
     n_traj = coords.shape[0]
 
-    # Pre-built visibility arrays for each segment
-    seg23_vis = np.array(get_zoom_focus_indices(), dtype=np.int32)
-    seg4_vis  = np.array(get_zoom_focus_indices(), dtype=np.int32)
-    seg5_vis  = np.array(get_seg5_focus_indices(), dtype=np.int32)
+    tritium_vis = np.array([TRITIUM_IDX], dtype=np.int32)
+    cluster_vis = np.array(get_cluster_focus_indices(), dtype=np.int32)
 
-    # Precompute Blender boundary frames
-    hide_others_bl = dcd_to_bl(HIDE_OTHERS_DCD_START)
-    seg4_bl = dcd_to_bl(SEG4_DCD_START)
-    seg5_bl = dcd_to_bl(SEG5_DCD_START)
-    seg5_end_bl = dcd_to_bl(SEG5_DCD_END)
-    fade_out_frames = max(int(FADE_OTHERS_FRAMES), 0)
-    fade_out_end_bl = min(hide_others_bl + fade_out_frames, seg5_bl)
-    fade_in_frames = max(int(FADE_CLUSTER_IN_FRAMES), 0)
-    fade_in_end_bl = min(seg5_bl + fade_in_frames, seg5_end_bl)
+    start_bl = dcd_to_bl(story_dcd["start"])
+    zoom_fade_end_bl = dcd_to_bl(story_dcd["zoom_fade_end"])
+    zoom_out_end_bl = dcd_to_bl(story_dcd["zoom_out_end"])
+    sphere_fade_in_end_bl = dcd_to_bl(story_dcd["sphere_fade_in_end"])
+    cluster_blend_end_bl = dcd_to_bl(story_dcd["cluster_blend_end"])
+    sphere_fade_out_end_bl = dcd_to_bl(story_dcd["sphere_fade_out_end"])
 
     # Cache per-instancer material for fast alpha updates.
     obj_materials = {}
@@ -814,45 +826,62 @@ def register_storyboard_handler(coords, instancer_objects, instancer_index_map, 
                 break
         obj_materials[obj_name] = mat
 
+    def phase_progress(frame, start_frame, end_frame):
+        if end_frame <= start_frame:
+            return 1.0 if frame >= end_frame else 0.0
+        t = (frame - start_frame) / float(end_frame - start_frame)
+        return max(0.0, min(1.0, t))
+
     def update_frame(scene, depsgraph=None):
-        bf        = scene.frame_current
+        bf = scene.frame_current
         frame_xyz = get_interpolated_coords(coords, bf)   # (natoms, 3) in Å
 
-        # Determine visibility mode for this frame
-        if bf < hide_others_bl:
+        if bf < zoom_fade_end_bl:
             show_all = True
-            vis_idx  = None
-        elif bf < fade_out_end_bl:
-            show_all = True
-            vis_idx  = None
+            vis_idx = None
+        elif bf < sphere_fade_in_end_bl:
+            show_all = False
+            vis_idx = tritium_vis
         else:
             show_all = False
-            if bf < seg4_bl:       # zoom-focus phase before seg 4 boundary
-                vis_idx = seg23_vis
-            elif bf < seg5_bl:     # seg 4
-                vis_idx = seg4_vis
-            else:                  # seg 5
-                vis_idx = seg5_vis
+            vis_idx = cluster_vis
 
-        # Fade non-focus objects during the hide transition.
-        if bf < hide_others_bl:
-            bulk_alpha = 1.0
-        elif bf < fade_out_end_bl and fade_out_end_bl > hide_others_bl:
-            t = (bf - hide_others_bl) / float(fade_out_end_bl - hide_others_bl)
-            bulk_alpha = 1.0 - max(0.0, min(1.0, t))
-        elif bf < seg5_bl:
+        # Non-tritium atoms: fade out during phase 1, stay hidden through
+        # tritium-only + zoom-out + sphere fade-in, then fade in as cluster.
+        if bf < zoom_fade_end_bl:
+            bulk_alpha = 1.0 - phase_progress(bf, start_bl, zoom_fade_end_bl)
+        elif bf < sphere_fade_in_end_bl:
             bulk_alpha = 0.0
-        elif bf < fade_in_end_bl and fade_in_end_bl > seg5_bl:
-            t = (bf - seg5_bl) / float(fade_in_end_bl - seg5_bl)
-            bulk_alpha = max(0.0, min(1.0, t))
+        elif bf < cluster_blend_end_bl:
+            bulk_alpha = phase_progress(bf, sphere_fade_in_end_bl, cluster_blend_end_bl)
         else:
             bulk_alpha = 1.0
 
+        # Reference sphere: stay hidden through zoom-out, fade in, hold through
+        # cluster blend-in, then fade out.
+        if bf < zoom_out_end_bl:
+            sphere_alpha = 0.0
+        elif bf < sphere_fade_in_end_bl:
+            sphere_alpha = SPHERE_FINAL_ALPHA * phase_progress(
+                bf,
+                zoom_out_end_bl,
+                sphere_fade_in_end_bl,
+            )
+        elif bf < cluster_blend_end_bl:
+            sphere_alpha = SPHERE_FINAL_ALPHA
+        elif bf < sphere_fade_out_end_bl:
+            sphere_alpha = SPHERE_FINAL_ALPHA * (
+                1.0 - phase_progress(bf, cluster_blend_end_bl, sphere_fade_out_end_bl)
+            )
+        else:
+            sphere_alpha = 0.0
+
         for obj_name, mat in obj_materials.items():
-            if obj_name in fade_object_names:
+            if obj_name in bulk_object_names:
                 set_material_alpha(mat, bulk_alpha)
             else:
                 set_material_alpha(mat, 1.0)
+        set_material_alpha(sphere_material, sphere_alpha)
 
         # Update each instancer mesh from its own global atom index list
         for obj_name, obj in instancer_objects.items():
@@ -891,16 +920,33 @@ def main():
         raise ValueError("FRAME_STEP must be >= 1.")
     if INTERP_MODE.strip().lower() not in {"nearest", "linear", "spline"}:
         raise ValueError('INTERP_MODE must be "nearest", "linear", or "spline".')
-    if not (SEG1_DCD_START <= ZOOM_START_DCD <= SEG5_DCD_END):
-        raise ValueError("ZOOM_START_DCD must be between SEG1_DCD_START and SEG5_DCD_END.")
-    if not (SEG1_DCD_START <= HIDE_OTHERS_DCD_START <= SEG5_DCD_END):
-        raise ValueError("HIDE_OTHERS_DCD_START must be between SEG1_DCD_START and SEG5_DCD_END.")
-    if ZOOM_START_DCD > HIDE_OTHERS_DCD_START:
-        raise ValueError("ZOOM_START_DCD must be <= HIDE_OTHERS_DCD_START.")
-    if FADE_OTHERS_FRAMES < 0:
-        raise ValueError("FADE_OTHERS_FRAMES must be >= 0.")
-    if FADE_CLUSTER_IN_FRAMES < 0:
-        raise ValueError("FADE_CLUSTER_IN_FRAMES must be >= 0.")
+    if STORY_DCD_STEPS < 1:
+        raise ValueError("STORY_DCD_STEPS must be >= 1.")
+    if DCD_FRAME_OFFSET != STORY_DCD_START:
+        raise ValueError("DCD_FRAME_OFFSET must match STORY_DCD_START in this storyboard script.")
+    phase_lengths = [
+        PHASE1_ZOOM_AND_FADE_DCD_FRAMES,
+        PHASE2_TRITIUM_ONLY_DCD_FRAMES,
+        PHASE3_ZOOM_OUT_DCD_FRAMES,
+        PHASE4_SPHERE_FADE_IN_DCD_FRAMES,
+        PHASE5_CLUSTER_BLEND_DCD_FRAMES,
+        PHASE6_SPHERE_FADE_OUT_DCD_FRAMES,
+    ]
+    phase_total = sum(phase_lengths)
+    if any(p < 0 for p in phase_lengths):
+        raise ValueError("All PHASE*_DCD_FRAMES values must be >= 0.")
+    if not (0.0 <= SPHERE_FINAL_ALPHA <= 1.0):
+        raise ValueError("SPHERE_FINAL_ALPHA must be in [0, 1].")
+    if SPHERE_RADIUS_ANGSTROM <= 0.0:
+        raise ValueError("SPHERE_RADIUS_ANGSTROM must be > 0.")
+
+    story_dcd = get_story_dcd_boundaries()
+    if story_dcd["sphere_fade_out_end"] > story_dcd["end"]:
+        raise ValueError(
+            "Phase durations exceed STORY_DCD_STEPS: "
+            f"total={phase_total}, STORY_DCD_STEPS={STORY_DCD_STEPS}. "
+            "Reduce PHASE*_DCD_FRAMES or increase STORY_DCD_STEPS."
+        )
 
     # 1. Clear scene
     bpy.ops.object.select_all(action="SELECT")
@@ -926,122 +972,66 @@ def main():
     bpy.context.scene.collection.children.link(mol_col)
 
     # 4. Build instancer objects.
-    #    - Bulk objects: all non-focus atoms (these will be faded during zoom).
-    #    - Focus objects: zoom-focus atoms, kept visible during fade.
-    #    - F_1/F_2 keep dedicated colors.
+    #    - One dedicated tritium object (always visible).
+    #    - Bulk element objects for all other atoms.
     element_global_indices = {}
     for g_idx, elem in enumerate(atom_order):
         element_global_indices.setdefault(elem, []).append(g_idx)
 
+    if not (0 <= TRITIUM_IDX < len(atom_order)):
+        raise ValueError(f"TRITIUM_IDX {TRITIUM_IDX} is out of range for this PDB ({len(atom_order)} atoms).")
+
     instancer_objects = {}
     instancer_index_map = {}
-    focus_object_names = set()
+    tritium_object_names = set()
 
-    zoom_focus_raw = get_zoom_focus_indices()
-    zoom_focus_set = {i for i in zoom_focus_raw if 0 <= i < len(atom_order)}
-    invalid_zoom_focus = [i for i in zoom_focus_raw if not (0 <= i < len(atom_order))]
-    if invalid_zoom_focus:
-        print(f"WARNING: Ignoring out-of-range zoom-focus indices: {invalid_zoom_focus}")
-
-    special_f = {FLUORIDE_1_IDX, FLUORIDE_2_IDX}
-
-    # Dedicated single-atom objects for zoom-focus atoms (except F_1/F_2,
-    # which get custom colors below).
-    for idx in sorted(zoom_focus_set):
-        if idx in special_f:
-            continue
-        elem = atom_order[idx]
-        obj_name = f"Focus_{idx}_{elem}"
-        focus_color = ATOM_COLORS.get(elem, DEFAULT_COLOR)
-        focus_mat = make_material_with_color(f"Atom_{obj_name}", focus_color)
-        parent_obj, _ = create_element_objects(
-            elem, [flat_positions[idx]], mol_col, object_name=obj_name, material=focus_mat
-        )
-        instancer_objects[obj_name] = parent_obj
-        instancer_index_map[obj_name] = np.array([idx], dtype=np.int32)
-        focus_object_names.add(obj_name)
-        print(f"  Instancer: {obj_name} (focus index {idx})")
+    tritium_element = atom_order[TRITIUM_IDX]
+    tritium_obj_name = f"Tritium_{TRITIUM_IDX}_{tritium_element}"
+    tritium_color = ATOM_COLORS.get(tritium_element, DEFAULT_COLOR)
+    tritium_mat = make_material_with_color(f"Atom_{tritium_obj_name}", tritium_color)
+    tritium_parent, _ = create_element_objects(
+        tritium_element,
+        [flat_positions[TRITIUM_IDX]],
+        mol_col,
+        object_name=tritium_obj_name,
+        material=tritium_mat,
+    )
+    instancer_objects[tritium_obj_name] = tritium_parent
+    instancer_index_map[tritium_obj_name] = np.array([TRITIUM_IDX], dtype=np.int32)
+    tritium_object_names.add(tritium_obj_name)
+    print(f"  Instancer: {tritium_obj_name} (index {TRITIUM_IDX})")
 
     for element in sorted(element_global_indices.keys()):
         g_idxs = element_global_indices[element]
-
-        if element != "F":
-            bulk_idxs = [i for i in g_idxs if i not in zoom_focus_set]
-            if not bulk_idxs:
-                continue
-            positions = [flat_positions[i] for i in bulk_idxs]
-            parent_obj, _ = create_element_objects(element, positions, mol_col, object_name=element)
-            instancer_objects[element] = parent_obj
-            instancer_index_map[element] = np.array(bulk_idxs, dtype=np.int32)
-            print(f"  Instancer: {element} ({len(bulk_idxs)} atoms)")
+        bulk_idxs = [i for i in g_idxs if i != TRITIUM_IDX]
+        if not bulk_idxs:
             continue
+        positions = [flat_positions[i] for i in bulk_idxs]
+        parent_obj, _ = create_element_objects(element, positions, mol_col, object_name=element)
+        instancer_objects[element] = parent_obj
+        instancer_index_map[element] = np.array(bulk_idxs, dtype=np.int32)
+        print(f"  Instancer: {element} ({len(bulk_idxs)} atoms)")
 
-        # Split fluorine into bulk + two singled-out fluorides.
-        f_bulk_idxs = [i for i in g_idxs if i not in special_f and i not in zoom_focus_set]
+    bulk_object_names = set(instancer_objects.keys()) - tritium_object_names
 
-        if f_bulk_idxs:
-            positions = [flat_positions[i] for i in f_bulk_idxs]
-            parent_obj, _ = create_element_objects(element, positions, mol_col, object_name="F")
-            instancer_objects["F"] = parent_obj
-            instancer_index_map["F"] = np.array(f_bulk_idxs, dtype=np.int32)
-            print(f"  Instancer: F ({len(f_bulk_idxs)} atoms)")
-
-        if FLUORIDE_1_IDX in g_idxs:
-            f1_color = FLUORIDE_1_COLOR if FLUORIDE_1_COLOR is not None else ATOM_COLORS.get("F", DEFAULT_COLOR)
-            f1_mat   = make_material_with_color("Atom_F_1", f1_color)
-            positions = [flat_positions[FLUORIDE_1_IDX]]
-            parent_obj, _ = create_element_objects(
-                "F", positions, mol_col, object_name="F_1", material=f1_mat
-            )
-            instancer_objects["F_1"] = parent_obj
-            instancer_index_map["F_1"] = np.array([FLUORIDE_1_IDX], dtype=np.int32)
-            focus_object_names.add("F_1")
-            print(f"  Instancer: F_1 (index {FLUORIDE_1_IDX})")
-        else:
-            print(f"WARNING: FLUORIDE_1_IDX {FLUORIDE_1_IDX} is not a fluorine atom in this PDB.")
-
-        if FLUORIDE_2_IDX in g_idxs:
-            f2_color = FLUORIDE_2_COLOR if FLUORIDE_2_COLOR is not None else ATOM_COLORS.get("F", DEFAULT_COLOR)
-            f2_mat   = make_material_with_color("Atom_F_2", f2_color)
-            positions = [flat_positions[FLUORIDE_2_IDX]]
-            parent_obj, _ = create_element_objects(
-                "F", positions, mol_col, object_name="F_2", material=f2_mat
-            )
-            instancer_objects["F_2"] = parent_obj
-            instancer_index_map["F_2"] = np.array([FLUORIDE_2_IDX], dtype=np.int32)
-            focus_object_names.add("F_2")
-            print(f"  Instancer: F_2 (index {FLUORIDE_2_IDX})")
-        else:
-            print(f"WARNING: FLUORIDE_2_IDX {FLUORIDE_2_IDX} is not a fluorine atom in this PDB.")
-
-    fade_object_names = set(instancer_objects.keys()) - focus_object_names
-
-    # 5. Compute molecule centroid and zoom-focus position (from static PDB)
+    # 5. Compute static centroids from PDB
     n_atoms  = len(flat_positions)
     cx = sum(p[0] for p in flat_positions) / n_atoms * SCALE
     cy = sum(p[1] for p in flat_positions) / n_atoms * SCALE
     cz = sum(p[2] for p in flat_positions) / n_atoms * SCALE
     centroid = Vector((cx, cy, cz))
 
-    valid_zoom_focus = [i for i in get_zoom_focus_indices() if i < n_atoms]
-    if valid_zoom_focus:
-        zfx = sum(flat_positions[i][0] for i in valid_zoom_focus) / len(valid_zoom_focus) * SCALE
-        zfy = sum(flat_positions[i][1] for i in valid_zoom_focus) / len(valid_zoom_focus) * SCALE
-        zfz = sum(flat_positions[i][2] for i in valid_zoom_focus) / len(valid_zoom_focus) * SCALE
-        focus_pos = Vector((zfx, zfy, zfz))
-    else:
-        print("WARNING: zoom-focus indices out of range — using centroid for zoom.")
-        focus_pos = centroid
-
-    # Centroid of the seg-5 focus cluster (from static PDB positions)
-    valid_focus = [i for i in get_seg5_focus_indices() if i < n_atoms]
-    if valid_focus:
-        fcx = sum(flat_positions[i][0] for i in valid_focus) / len(valid_focus) * SCALE
-        fcy = sum(flat_positions[i][1] for i in valid_focus) / len(valid_focus) * SCALE
-        fcz = sum(flat_positions[i][2] for i in valid_focus) / len(valid_focus) * SCALE
+    valid_cluster = [i for i in get_cluster_focus_indices() if 0 <= i < n_atoms]
+    invalid_cluster = [i for i in get_cluster_focus_indices() if not (0 <= i < n_atoms)]
+    if invalid_cluster:
+        print(f"WARNING: Ignoring out-of-range FOCUS_INDICES: {invalid_cluster}")
+    if valid_cluster:
+        fcx = sum(flat_positions[i][0] for i in valid_cluster) / len(valid_cluster) * SCALE
+        fcy = sum(flat_positions[i][1] for i in valid_cluster) / len(valid_cluster) * SCALE
+        fcz = sum(flat_positions[i][2] for i in valid_cluster) / len(valid_cluster) * SCALE
         cluster_center = Vector((fcx, fcy, fcz))
     else:
-        print("WARNING: FOCUS_INDICES out of range — using molecule centroid for seg 5.")
+        print("WARNING: FOCUS_INDICES out of range — using molecule centroid for cluster center.")
         cluster_center = centroid
 
     # 6. Camera/target/light rig from optional setup file, else create from scratch
@@ -1099,30 +1089,48 @@ def main():
         create_default_three_point_lights(mol_col, target, cam)
 
     # 7. Parse DCD trajectory
-    traj_path = resolve_path(TRAJ_FILE, "traj_nvt.dcd")
+    traj_path = resolve_path(TRAJ_FILE, DEFAULT_TRAJ_FILENAME)
     if not traj_path:
         raise FileNotFoundError(
-            "traj_nvt.dcd not found. Save your .blend next to it, or set TRAJ_FILE.")
+            f"{DEFAULT_TRAJ_FILENAME} not found. Save your .blend next to it, or set TRAJ_FILE."
+        )
     print(f"DCD: {traj_path}")
     coords = parse_dcd(traj_path, frame_step=FRAME_STEP)
+    if TRITIUM_IDX >= coords.shape[1]:
+        raise ValueError(
+            f"TRITIUM_IDX {TRITIUM_IDX} is out of range for DCD with {coords.shape[1]} atoms."
+        )
 
-    # 8. Set up camera animation keyframes
-    setup_camera_animation(cam, target, focus_pos, centroid, cluster_center)
+    # 8. Dynamic anchor points from trajectory
+    tritium_zoom_end_bl = dcd_to_bl(story_dcd["zoom_fade_end"])
+    tritium_zoom_end_pos = get_interpolated_coords(coords, tritium_zoom_end_bl)[TRITIUM_IDX] * SCALE
+    tritium_anchor = Vector((float(tritium_zoom_end_pos[0]), float(tritium_zoom_end_pos[1]), float(tritium_zoom_end_pos[2])))
+    _, sphere_material = create_reference_sphere(mol_col, target)
 
-    # 9. Set Blender timeline
-    bl_start = dcd_to_bl(SEG1_DCD_START)
-    bl_end   = dcd_to_bl(SEG5_DCD_END)
+    # 9. Set up camera animation keyframes
+    setup_camera_animation(cam, target, centroid, tritium_anchor, cluster_center, story_dcd)
+
+    # 10. Set Blender timeline
+    bl_start = dcd_to_bl(story_dcd["start"])
+    bl_end   = dcd_to_bl(story_dcd["end"])
     bpy.context.scene.frame_start   = bl_start
     bpy.context.scene.frame_end     = bl_end
     bpy.context.scene.frame_current = bl_start
     force_black_world_background(bpy.context.scene)
     print(f"Timeline: Blender frames {bl_start}–{bl_end}  "
-          f"(DCD frames {SEG1_DCD_START}–{SEG5_DCD_END})")
+          f"(DCD frames {story_dcd['start']}–{story_dcd['end']})")
 
-    # 10. Register storyboard frame handler
-    register_storyboard_handler(coords, instancer_objects, instancer_index_map, fade_object_names)
+    # 11. Register storyboard frame handler
+    register_storyboard_handler(
+        coords,
+        instancer_objects,
+        instancer_index_map,
+        bulk_object_names,
+        sphere_material,
+        story_dcd,
+    )
 
-    # 11. Switch viewport to Material Preview (GUI only)
+    # 12. Switch viewport to Material Preview (GUI only)
     if bpy.context.screen is not None:
         for area in bpy.context.screen.areas:
             if area.type == "VIEW_3D":
