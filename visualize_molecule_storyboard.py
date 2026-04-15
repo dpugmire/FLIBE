@@ -47,9 +47,9 @@ SETUP_EMPTY_NAME  = ""   # optional exact empty target object name in setup file
 AUTO_LIGHT_DISTANCE_FACTOR = 1.6   # multiplied by current camera-target distance
 AUTO_LIGHT_MIN_DISTANCE    = 8.0
 AUTO_LIGHT_SIZE            = 7.5
-AUTO_LIGHT_POWER_RIGHT     = 1400.0
-AUTO_LIGHT_POWER_LEFT      = 350.0
-AUTO_LIGHT_POWER_TOP       = 1200.0
+AUTO_LIGHT_POWER_RIGHT     = 1500.0
+AUTO_LIGHT_POWER_LEFT      = 300.0
+AUTO_LIGHT_POWER_TOP       = 1300.0
 
 # ── Trajectory sampling ───────────────────────────────────────────────────────
 # Use every Nth DCD frame.
@@ -117,13 +117,13 @@ FOCUS_INDICES = [
 # space ("LOCAL") or Blender world space ("WORLD").
 #
 # If left as None, a legacy fallback direction is used.
-CAM_INITIAL_XYZ   = (2, -10, 4)       # e.g. (12.0, -10.0, 6.5)
+CAM_INITIAL_XYZ   = (-3.7, -9.4, 2.3) # tuned left/up view angle
 CAM_INITIAL_SPACE = "WORLD"           # "WORLD" or "LOCAL"
 
 # Distance (Blender units; 1 BU = 10 Å) from AtomCentre for each segment.
 # Larger = further away / more zoomed out.
-CAM_DIST_SEG1 = 15.0   # Seg 1: wide shot — all atoms
-CAM_DIST_SEG2 = 15.0   # At ZOOM_START_DCD: start zoom/pan toward H + 2F focus
+CAM_DIST_SEG1 = 10.0   # Seg 1: wide shot — all atoms
+CAM_DIST_SEG2 = 10.0   # At ZOOM_START_DCD: start zoom/pan toward H + 2F focus
 CAM_DIST_SEG3 =  2.0   # Seg 3: close-up — H + two fluorides
 CAM_DIST_SEG4 =  2.0   # Seg 4: same close-up — H + two fluorides
 CAM_DIST_SEG5 =  4.0 #8.0   # Seg 5: backed off — focus cluster
@@ -572,9 +572,10 @@ def create_default_three_point_lights(collection, target, cam):
 
     dist = max(cam_vec.length * AUTO_LIGHT_DISTANCE_FACTOR, AUTO_LIGHT_MIN_DISTANCE)
 
-    right_pos = target_pos + ( side_dir * 1.00 + top_dir * 0.25 + view_dir * 0.35) * dist
-    left_pos  = target_pos + (-side_dir * 1.00 + top_dir * 0.15 + view_dir * 0.20) * dist
-    top_pos   = target_pos + ( top_dir * 1.15 + view_dir * 0.10) * dist
+    # Asymmetric placement: strong camera-side key, weak opposite fill, and top rim.
+    right_pos = target_pos + ( side_dir * 1.05 + top_dir * 0.25 + view_dir * 0.45) * dist
+    left_pos  = target_pos + (-side_dir * 1.10 + top_dir * 0.10 - view_dir * 0.05) * dist
+    top_pos   = target_pos + ( top_dir * 1.20 - view_dir * 0.10) * dist
 
     create_area_light("MolAreaRight", right_pos, AUTO_LIGHT_POWER_RIGHT, AUTO_LIGHT_SIZE, collection, target)
     create_area_light("MolAreaLeft",  left_pos,  AUTO_LIGHT_POWER_LEFT,  AUTO_LIGHT_SIZE, collection, target)
