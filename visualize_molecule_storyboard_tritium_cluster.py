@@ -8,6 +8,7 @@ Run inside Blender via the Scripting workspace:
   4. Click "Run Script"
 
 Storyboard (all timings are DCD frame numbers):
+  Phase 0  camera pre-align (start higher/side, settle to zoom start view)
   Phase 1  all atoms + zoom to tritium
   Phase 2  tritium-focused hold
   Phase 3  fade out non-cluster atoms while fading sphere in
@@ -67,7 +68,8 @@ INTERP_MODE = "linear"
 STORY_DCD_START = 900
 STORY_DCD_STEPS = 660
 
-# Storyboard phase timing (DCD frames). Remaining frames become phase 6 tail.
+# Storyboard phase timing (DCD frames). Remaining frames become phase 5 tail.
+PRE_ZOOM_ALIGN_DCD_FRAMES = 60
 PHASE1_ZOOM_TO_T_DCD_FRAMES = 200
 PHASE2_T_FOCUS_HOLD_DCD_FRAMES = 0
 
@@ -116,6 +118,17 @@ CAM_DIST_ALL_ATOMS = 10.0  # phase 1 start (wide shot)
 CAM_DIST_TRITIUM   = 4.0   # zoomed-in tritium view
 CAM_DIST_SPHERE    = 4.0   # zoomed-out distance before sphere fade-in
 CAM_DIST_CLUSTER   = 4.0   # cluster view after blend-in
+
+# Camera pre-align offset (Blender units, local to AtomCentre parent space).
+# The intro starts at current zoom-start position + this offset, then settles
+# onto the zoom-start position over PRE_ZOOM_ALIGN_DCD_FRAMES.
+CAM_PRE_ZOOM_SIDE_OFFSET = 7.5
+CAM_PRE_ZOOM_UP_OFFSET   = 4.5
+
+# Orbit around the cluster once non-cluster atoms are fully faded.
+CAM_ORBIT_TOTAL_DEGREES = 70.0
+CAM_ORBIT_KEYFRAME_STEP_FRAMES = 8
+CAM_ORBIT_UP_DELTA = 2.5
 
 # ── Display ───────────────────────────────────────────────────────────────────
 SCALE = 0.1          # Å → Blender units  (1 Å = 0.1 BU)
@@ -254,6 +267,7 @@ def get_story_dcd_boundaries():
 
     Keys:
       start
+      pre_zoom_align_end
       zoom_to_t_end
       t_focus_hold_end
       transition_start
@@ -264,7 +278,8 @@ def get_story_dcd_boundaries():
     """
     start = int(STORY_DCD_START)
     end = start + int(STORY_DCD_STEPS)
-    zoom_to_t_end = start + int(PHASE1_ZOOM_TO_T_DCD_FRAMES)
+    pre_zoom_align_end = start + int(PRE_ZOOM_ALIGN_DCD_FRAMES)
+    zoom_to_t_end = pre_zoom_align_end + int(PHASE1_ZOOM_TO_T_DCD_FRAMES)
     t_focus_hold_end = zoom_to_t_end + int(PHASE2_T_FOCUS_HOLD_DCD_FRAMES)
     transition_start = t_focus_hold_end
     transition_end = transition_start + max(
@@ -276,6 +291,7 @@ def get_story_dcd_boundaries():
     sphere_fade_out_end = with_sphere_hold_end + int(FADE_SPHERE_OUT_DCD_FRAMES)
     return {
         "start": start,
+        "pre_zoom_align_end": pre_zoom_align_end,
         "zoom_to_t_end": zoom_to_t_end,
         "t_focus_hold_end": t_focus_hold_end,
         "transition_start": transition_start,
@@ -751,8 +767,14 @@ def setup_camera_animation(cam, target, centroid, tritium_anchor, cluster_center
     Set up the camera rig and keyframe the storyboard animation.
     """
     cam_start_local, cam_dir = get_initial_camera_local_offset(centroid)
+    cam_intro_local = cam_start_local + Vector((
+        float(CAM_PRE_ZOOM_SIDE_OFFSET),
+        0.0,
+        float(CAM_PRE_ZOOM_UP_OFFSET),
+    ))
 
     start_bl = dcd_to_bl(story_dcd["start"])
+    pre_zoom_align_end_bl = dcd_to_bl(story_dcd["pre_zoom_align_end"])
     zoom_to_t_end_bl = dcd_to_bl(story_dcd["zoom_to_t_end"])
     t_focus_hold_end_bl = dcd_to_bl(story_dcd["t_focus_hold_end"])
     transition_end_bl = dcd_to_bl(story_dcd["transition_end"])
@@ -760,25 +782,74 @@ def setup_camera_animation(cam, target, centroid, tritium_anchor, cluster_center
     sphere_fade_out_end_bl = dcd_to_bl(story_dcd["sphere_fade_out_end"])
     end_bl = dcd_to_bl(story_dcd["end"])
 
+    horiz = Vector((cam_dir.x, cam_dir.y, 0.0))
+    horiz_len = horiz.length
+    if horiz_len < 1.0e-9:
+        horiz_dir = Vector((1.0, 0.0, 0.0))
+        horiz_ratio = 1.0
+    else:
+        horiz_dir = horiz / horiz_len
+        horiz_ratio = horiz_len
+
+    def orbit_local_offset(distance, angle_rad, up_lift=0.0):
+        z = float(distance) * float(cam_dir.z) + float(up_lift)
+        h = float(distance) * float(horiz_ratio)
+        rot = Matrix.Rotation(float(angle_rad), 3, 'Z')
+        hvec = rot @ (horiz_dir * h)
+        return Vector((hvec.x, hvec.y, z))
+
+    def distance_for_orbit_frame(frame):
+        if frame <= with_sphere_hold_end_bl:
+            return float(CAM_DIST_SPHERE)
+        if frame >= sphere_fade_out_end_bl:
+            return float(CAM_DIST_CLUSTER)
+        denom = float(sphere_fade_out_end_bl - with_sphere_hold_end_bl)
+        if denom <= 0.0:
+            return float(CAM_DIST_CLUSTER)
+        t = (float(frame) - float(with_sphere_hold_end_bl)) / denom
+        return (1.0 - t) * float(CAM_DIST_SPHERE) + t * float(CAM_DIST_CLUSTER)
+
     # Camera LOCAL location keyframes (distance from target)
-    cam.location = cam_start_local
+    cam.location = cam_intro_local
     cam.keyframe_insert(data_path="location", frame=start_bl)
+    cam.location = cam_start_local
+    cam.keyframe_insert(data_path="location", frame=pre_zoom_align_end_bl)
     cam.location = cam_dir * CAM_DIST_TRITIUM
     cam.keyframe_insert(data_path="location", frame=zoom_to_t_end_bl)
     cam.location = cam_dir * CAM_DIST_TRITIUM
     cam.keyframe_insert(data_path="location", frame=t_focus_hold_end_bl)
-    cam.location = cam_dir * CAM_DIST_SPHERE
-    cam.keyframe_insert(data_path="location", frame=transition_end_bl)
-    cam.location = cam_dir * CAM_DIST_SPHERE
-    cam.keyframe_insert(data_path="location", frame=with_sphere_hold_end_bl)
-    cam.location = cam_dir * CAM_DIST_CLUSTER
-    cam.keyframe_insert(data_path="location", frame=sphere_fade_out_end_bl)
-    cam.location = cam_dir * CAM_DIST_CLUSTER
-    cam.keyframe_insert(data_path="location", frame=end_bl)
+
+    # From the cluster-only stage onward, orbit around the cluster.
+    orbit_start_bl = transition_end_bl
+    orbit_end_bl = end_bl
+    orbit_span = max(orbit_end_bl - orbit_start_bl, 1)
+    orbit_step = max(int(CAM_ORBIT_KEYFRAME_STEP_FRAMES), 1)
+    total_angle = math.radians(float(CAM_ORBIT_TOTAL_DEGREES))
+
+    frame = orbit_start_bl
+    while frame <= orbit_end_bl:
+        t = (frame - orbit_start_bl) / float(orbit_span)
+        cam.location = orbit_local_offset(
+            distance_for_orbit_frame(frame),
+            total_angle * t,
+            float(CAM_ORBIT_UP_DELTA) * t,
+        )
+        cam.keyframe_insert(data_path="location", frame=frame)
+        frame += orbit_step
+
+    if (frame - orbit_step) != orbit_end_bl:
+        cam.location = orbit_local_offset(
+            distance_for_orbit_frame(orbit_end_bl),
+            total_angle,
+            float(CAM_ORBIT_UP_DELTA),
+        )
+        cam.keyframe_insert(data_path="location", frame=orbit_end_bl)
 
     # Target WORLD location keyframes (look-at point)
     target.location = centroid
     target.keyframe_insert(data_path="location", frame=start_bl)
+    target.location = centroid
+    target.keyframe_insert(data_path="location", frame=pre_zoom_align_end_bl)
     target.location = tritium_anchor
     target.keyframe_insert(data_path="location", frame=zoom_to_t_end_bl)
     target.location = tritium_anchor
@@ -927,6 +998,7 @@ def main():
     if boundary_mode not in {"sphere", "none"}:
         raise ValueError('BOUNDARY_MODE must be one of: "sphere", "none".')
     timing_values = [
+        PRE_ZOOM_ALIGN_DCD_FRAMES,
         PHASE1_ZOOM_TO_T_DCD_FRAMES,
         PHASE2_T_FOCUS_HOLD_DCD_FRAMES,
         FADE_NON_CLUSTER_OUT_DCD_FRAMES,
@@ -935,9 +1007,12 @@ def main():
     ]
     if any(p < 0 for p in timing_values):
         raise ValueError("All PHASE*/FADE*_DCD_FRAMES values must be >= 0.")
+    if int(CAM_ORBIT_KEYFRAME_STEP_FRAMES) < 1:
+        raise ValueError("CAM_ORBIT_KEYFRAME_STEP_FRAMES must be >= 1.")
     transition_frames = max(int(FADE_NON_CLUSTER_OUT_DCD_FRAMES), int(FADE_SPHERE_IN_DCD_FRAMES))
     phase_total = (
-        int(PHASE1_ZOOM_TO_T_DCD_FRAMES)
+        int(PRE_ZOOM_ALIGN_DCD_FRAMES)
+        + int(PHASE1_ZOOM_TO_T_DCD_FRAMES)
         + int(PHASE2_T_FOCUS_HOLD_DCD_FRAMES)
         + transition_frames
         + int(FADE_SPHERE_OUT_DCD_FRAMES)

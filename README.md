@@ -17,19 +17,24 @@ Large trajectory/data/render artifacts are excluded from version control via `.g
 
 `visualize_molecule_storyboard_tritium_cluster.py` is a dedicated storyboard for:
 
-1. all atoms + zoom toward tritium
-2. tritium-focused hold
-3. fade out non-cluster atoms while sphere fades in
-4. sphere fades out immediately after fade-in completes
-5. cluster + tritium tail
+1. pre-align camera (higher/side start, then settle to zoom-start view)
+2. all atoms + zoom toward tritium
+3. tritium-focused hold
+4. fade out non-cluster atoms while sphere fades in
+5. sphere fades out immediately after fade-in completes
+6. cluster + tritium tail
 
 Key defaults and knobs are in the script header:
 
 - Trajectory window: `STORY_DCD_START`, `STORY_DCD_STEPS`
-- Phase timing: `PHASE1_ZOOM_TO_T_DCD_FRAMES`, `PHASE2_T_FOCUS_HOLD_DCD_FRAMES`
+- Phase timing: `PRE_ZOOM_ALIGN_DCD_FRAMES`, `PHASE1_ZOOM_TO_T_DCD_FRAMES`,
+  `PHASE2_T_FOCUS_HOLD_DCD_FRAMES`
 - Fade timing: `FADE_NON_CLUSTER_OUT_DCD_FRAMES`, `FADE_SPHERE_IN_DCD_FRAMES`,
   `FADE_SPHERE_OUT_DCD_FRAMES`
 - Camera distances: `CAM_DIST_ALL_ATOMS`, `CAM_DIST_TRITIUM`, `CAM_DIST_SPHERE`, `CAM_DIST_CLUSTER`
+- Camera pre-align offsets: `CAM_PRE_ZOOM_SIDE_OFFSET`, `CAM_PRE_ZOOM_UP_OFFSET`
+- Camera orbit: `CAM_ORBIT_TOTAL_DEGREES`, `CAM_ORBIT_KEYFRAME_STEP_FRAMES`,
+  `CAM_ORBIT_UP_DELTA`
 - Sphere style: `SPHERE_RADIUS_ANGSTROM`, `SPHERE_COLOR`, `SPHERE_FINAL_ALPHA`
 - Boundary mode: `BOUNDARY_MODE = "sphere" | "none"`
 
