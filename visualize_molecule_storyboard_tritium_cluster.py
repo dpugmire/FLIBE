@@ -8,13 +8,12 @@ Run inside Blender via the Scripting workspace:
   4. Click "Run Script"
 
 Storyboard (all timings are DCD frame numbers):
-  Phase 1  all atoms, animate + zoom to tritium while fading non-tritium out
-  Phase 2  tritium only
-  Phase 3  tritium only + zoom out to fit reference sphere
-  Phase 4  tritium only + fade in fixed-centre reference sphere
-  Phase 5  fade in cluster atoms
-  Phase 6  fade out reference sphere
-  Phase 7  cluster atoms only
+  Phase 1  all atoms + zoom to tritium
+  Phase 2  tritium-focused hold
+  Phase 3  fade out non-cluster atoms while fading sphere in (same phase)
+  Phase 4  hold cluster+tritium with semi-transparent sphere
+  Phase 5  fade sphere out
+  Phase 6  cluster+tritium tail
 """
 
 import bpy
@@ -45,10 +44,11 @@ SETUP_EMPTY_NAME  = ""   # optional exact empty target object name in setup file
 # Lights are positioned relative to the camera view direction and TrackTo AtomCentre.
 AUTO_LIGHT_DISTANCE_FACTOR = 1.6   # multiplied by current camera-target distance
 AUTO_LIGHT_MIN_DISTANCE    = 8.0
-AUTO_LIGHT_SIZE            = 7.5
-AUTO_LIGHT_POWER_RIGHT     = 1500.0
-AUTO_LIGHT_POWER_LEFT      = 300.0
-AUTO_LIGHT_POWER_TOP       = 1300.0
+AUTO_LIGHT_SIZE            = 2.4
+AUTO_LIGHT_POWER_RIGHT     = 650.0
+AUTO_LIGHT_POWER_LEFT      = 60.0
+AUTO_LIGHT_POWER_TOP       = 220.0
+AUTO_LIGHT_SPREAD_DEGREES  = 85.0
 
 # ── Trajectory sampling ───────────────────────────────────────────────────────
 # Use every Nth DCD frame.
@@ -64,18 +64,19 @@ FRAME_STEP = 1
 INTERP_MODE = "linear"
 
 # ── Story timing (DCD frames) ─────────────────────────────────────────────────
-# Requested timeline window: start at DCD frame 800 and use 600 DCD steps.
-STORY_DCD_START = 800
-STORY_DCD_STEPS = 600
+# Storyboard timeline window.
+STORY_DCD_START = 900
+STORY_DCD_STEPS = 660
 
-# Phase durations (all in DCD frames). Their sum must be <= STORY_DCD_STEPS.
-# Remaining frames are assigned to the final cluster-only hold phase.
-PHASE1_ZOOM_AND_FADE_DCD_FRAMES = 200  # all atoms visible, non-tritium fades out
-PHASE2_TRITIUM_ONLY_DCD_FRAMES  = 120  # tritium-only hold
-PHASE3_ZOOM_OUT_DCD_FRAMES = 100       # KNOB: increase to delay sphere fade-in start
-PHASE4_SPHERE_FADE_IN_DCD_FRAMES = 60  # sphere alpha 0 -> SPHERE_FINAL_ALPHA
-PHASE5_CLUSTER_BLEND_DCD_FRAMES = 60   # cluster atoms alpha 0->1
-PHASE6_SPHERE_FADE_OUT_DCD_FRAMES = 40 # sphere alpha SPHERE_FINAL_ALPHA -> 0
+# Storyboard phase timing (DCD frames). Remaining frames become phase 6 tail.
+PHASE1_ZOOM_TO_T_DCD_FRAMES = 200
+PHASE2_T_FOCUS_HOLD_DCD_FRAMES = 0
+PHASE4_WITH_SPHERE_HOLD_DCD_FRAMES = 60
+
+# Fade knobs (DCD frames).
+FADE_NON_CLUSTER_OUT_DCD_FRAMES = 60
+FADE_SPHERE_IN_DCD_FRAMES = 110
+FADE_SPHERE_OUT_DCD_FRAMES = 40
 
 # ── DCD ↔ Blender frame mapping ───────────────────────────────────────────────
 # Blender frame 1 corresponds to this DCD frame number.
@@ -124,8 +125,12 @@ SCALE = 0.1          # Å → Blender units  (1 Å = 0.1 BU)
 SPHERE_SEGMENTS = 64   # longitude divisions (higher = smoother spheres)
 SPHERE_RINGS    = 32   # latitude divisions
 
+# Boundary style shown during sphere phases (3-5).
+# Options: "sphere", "none"
+BOUNDARY_MODE = "sphere"
+
 # Static reference sphere (centered at the target empty).
-SPHERE_RADIUS_ANGSTROM = 7.0
+SPHERE_RADIUS_ANGSTROM = 9.0
 SPHERE_COLOR = (0.82, 0.82, 0.82, 1.0)  # light gray
 SPHERE_FINAL_ALPHA = 0.5                # 50% transparent
 
@@ -146,10 +151,10 @@ ATOM_RADII['Li'] *= 0.5
 
 # ── CPK colours (RGBA, linear sRGB, values 0.0–1.0) ──────────────────────────
 ATOM_COLORS = {
-    "F"  : (0.565, 0.878, 0.314, 1.0),   # green
-    "Li" : (0.784, 0.502, 1.000, 1.0),   # violet
-    "Be" : (0.765, 1.000, 0.000, 1.0),   # yellow-green
-    "H"  : (1.000, 0.000, 0.000, 1.0),   # white
+    "F"  : (0.000, 1.000, 0.000, 1.0),   # green
+    "Li" : (0.000, 0.000, 1.000, 1.0),   # blue
+    "Be" : (1.000, 1.000, 0.000, 1.0),   # yellow
+    "H"  : (1.000, 0.000, 0.000, 1.0),   # red (tritium)
     "B"  : (1.000, 0.671, 0.475, 1.0),
     "C"  : (0.565, 0.565, 0.565, 1.0),
     "N"  : (0.188, 0.314, 0.973, 1.0),
@@ -251,29 +256,32 @@ def get_story_dcd_boundaries():
 
     Keys:
       start
-      zoom_fade_end
-      tritium_only_end
-      zoom_out_end
-      sphere_fade_in_end
-      cluster_blend_end
+      zoom_to_t_end
+      t_focus_hold_end
+      transition_start
+      transition_end
+      with_sphere_hold_end
       sphere_fade_out_end
       end
     """
     start = int(STORY_DCD_START)
     end = start + int(STORY_DCD_STEPS)
-    zoom_fade_end = start + int(PHASE1_ZOOM_AND_FADE_DCD_FRAMES)
-    tritium_only_end = zoom_fade_end + int(PHASE2_TRITIUM_ONLY_DCD_FRAMES)
-    zoom_out_end = tritium_only_end + int(PHASE3_ZOOM_OUT_DCD_FRAMES)
-    sphere_fade_in_end = zoom_out_end + int(PHASE4_SPHERE_FADE_IN_DCD_FRAMES)
-    cluster_blend_end = sphere_fade_in_end + int(PHASE5_CLUSTER_BLEND_DCD_FRAMES)
-    sphere_fade_out_end = cluster_blend_end + int(PHASE6_SPHERE_FADE_OUT_DCD_FRAMES)
+    zoom_to_t_end = start + int(PHASE1_ZOOM_TO_T_DCD_FRAMES)
+    t_focus_hold_end = zoom_to_t_end + int(PHASE2_T_FOCUS_HOLD_DCD_FRAMES)
+    transition_start = t_focus_hold_end
+    transition_end = transition_start + max(
+        int(FADE_NON_CLUSTER_OUT_DCD_FRAMES),
+        int(FADE_SPHERE_IN_DCD_FRAMES),
+    )
+    with_sphere_hold_end = transition_end + int(PHASE4_WITH_SPHERE_HOLD_DCD_FRAMES)
+    sphere_fade_out_end = with_sphere_hold_end + int(FADE_SPHERE_OUT_DCD_FRAMES)
     return {
         "start": start,
-        "zoom_fade_end": zoom_fade_end,
-        "tritium_only_end": tritium_only_end,
-        "zoom_out_end": zoom_out_end,
-        "sphere_fade_in_end": sphere_fade_in_end,
-        "cluster_blend_end": cluster_blend_end,
+        "zoom_to_t_end": zoom_to_t_end,
+        "t_focus_hold_end": t_focus_hold_end,
+        "transition_start": transition_start,
+        "transition_end": transition_end,
+        "with_sphere_hold_end": with_sphere_hold_end,
         "sphere_fade_out_end": sphere_fade_out_end,
         "end": end,
     }
@@ -406,7 +414,7 @@ def make_material(element):
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     bsdf.inputs["Base Color"].default_value = ATOM_COLORS.get(element, DEFAULT_COLOR)
     bsdf.inputs["Metallic"].default_value   = 0.0
-    bsdf.inputs["Roughness"].default_value  = 0.18
+    bsdf.inputs["Roughness"].default_value  = 0.90
     return mat
 
 
@@ -419,7 +427,7 @@ def make_material_with_color(mat_name, color_rgba):
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     bsdf.inputs["Base Color"].default_value = color_rgba
     bsdf.inputs["Metallic"].default_value   = 0.0
-    bsdf.inputs["Roughness"].default_value  = 0.18
+    bsdf.inputs["Roughness"].default_value  = 0.90
     return mat
 
 
@@ -636,6 +644,10 @@ def create_area_light(name, location, power, size, collection, target):
     light_data.energy = power
     light_data.shape  = "SQUARE"
     light_data.size   = size
+    if hasattr(light_data, "spread"):
+        light_data.spread = math.radians(float(AUTO_LIGHT_SPREAD_DEGREES))
+    if hasattr(light_data, "use_shadow"):
+        light_data.use_shadow = True
 
     light_obj = bpy.data.objects.new(name, light_data)
     light_obj.location = location
@@ -742,11 +754,10 @@ def setup_camera_animation(cam, target, centroid, tritium_anchor, cluster_center
     cam_start_local, cam_dir = get_initial_camera_local_offset(centroid)
 
     start_bl = dcd_to_bl(story_dcd["start"])
-    zoom_fade_end_bl = dcd_to_bl(story_dcd["zoom_fade_end"])
-    tritium_only_end_bl = dcd_to_bl(story_dcd["tritium_only_end"])
-    zoom_out_end_bl = dcd_to_bl(story_dcd["zoom_out_end"])
-    sphere_fade_in_end_bl = dcd_to_bl(story_dcd["sphere_fade_in_end"])
-    cluster_blend_end_bl = dcd_to_bl(story_dcd["cluster_blend_end"])
+    zoom_to_t_end_bl = dcd_to_bl(story_dcd["zoom_to_t_end"])
+    t_focus_hold_end_bl = dcd_to_bl(story_dcd["t_focus_hold_end"])
+    transition_end_bl = dcd_to_bl(story_dcd["transition_end"])
+    with_sphere_hold_end_bl = dcd_to_bl(story_dcd["with_sphere_hold_end"])
     sphere_fade_out_end_bl = dcd_to_bl(story_dcd["sphere_fade_out_end"])
     end_bl = dcd_to_bl(story_dcd["end"])
 
@@ -754,15 +765,13 @@ def setup_camera_animation(cam, target, centroid, tritium_anchor, cluster_center
     cam.location = cam_start_local
     cam.keyframe_insert(data_path="location", frame=start_bl)
     cam.location = cam_dir * CAM_DIST_TRITIUM
-    cam.keyframe_insert(data_path="location", frame=zoom_fade_end_bl)
+    cam.keyframe_insert(data_path="location", frame=zoom_to_t_end_bl)
     cam.location = cam_dir * CAM_DIST_TRITIUM
-    cam.keyframe_insert(data_path="location", frame=tritium_only_end_bl)
+    cam.keyframe_insert(data_path="location", frame=t_focus_hold_end_bl)
     cam.location = cam_dir * CAM_DIST_SPHERE
-    cam.keyframe_insert(data_path="location", frame=zoom_out_end_bl)
+    cam.keyframe_insert(data_path="location", frame=transition_end_bl)
     cam.location = cam_dir * CAM_DIST_SPHERE
-    cam.keyframe_insert(data_path="location", frame=sphere_fade_in_end_bl)
-    cam.location = cam_dir * CAM_DIST_CLUSTER
-    cam.keyframe_insert(data_path="location", frame=cluster_blend_end_bl)
+    cam.keyframe_insert(data_path="location", frame=with_sphere_hold_end_bl)
     cam.location = cam_dir * CAM_DIST_CLUSTER
     cam.keyframe_insert(data_path="location", frame=sphere_fade_out_end_bl)
     cam.location = cam_dir * CAM_DIST_CLUSTER
@@ -772,15 +781,13 @@ def setup_camera_animation(cam, target, centroid, tritium_anchor, cluster_center
     target.location = centroid
     target.keyframe_insert(data_path="location", frame=start_bl)
     target.location = tritium_anchor
-    target.keyframe_insert(data_path="location", frame=zoom_fade_end_bl)
+    target.keyframe_insert(data_path="location", frame=zoom_to_t_end_bl)
     target.location = tritium_anchor
-    target.keyframe_insert(data_path="location", frame=tritium_only_end_bl)
-    target.location = tritium_anchor
-    target.keyframe_insert(data_path="location", frame=zoom_out_end_bl)
-    target.location = tritium_anchor
-    target.keyframe_insert(data_path="location", frame=sphere_fade_in_end_bl)
+    target.keyframe_insert(data_path="location", frame=t_focus_hold_end_bl)
     target.location = cluster_center
-    target.keyframe_insert(data_path="location", frame=cluster_blend_end_bl)
+    target.keyframe_insert(data_path="location", frame=transition_end_bl)
+    target.location = cluster_center
+    target.keyframe_insert(data_path="location", frame=with_sphere_hold_end_bl)
     target.location = cluster_center
     target.keyframe_insert(data_path="location", frame=sphere_fade_out_end_bl)
     target.location = cluster_center
@@ -797,8 +804,11 @@ def register_storyboard_handler(
     coords,
     instancer_objects,
     instancer_index_map,
-    bulk_object_names,
-    sphere_material,
+    noncluster_object_names,
+    boundary_materials,
+    target,
+    dynamic_center_indices,
+    follow_cluster_center,
     story_dcd,
 ):
     """
@@ -806,15 +816,12 @@ def register_storyboard_handler(
     """
     n_traj = coords.shape[0]
 
-    tritium_vis = np.array([TRITIUM_IDX], dtype=np.int32)
-    cluster_vis = np.array(get_cluster_focus_indices(), dtype=np.int32)
-
-    start_bl = dcd_to_bl(story_dcd["start"])
-    zoom_fade_end_bl = dcd_to_bl(story_dcd["zoom_fade_end"])
-    zoom_out_end_bl = dcd_to_bl(story_dcd["zoom_out_end"])
-    sphere_fade_in_end_bl = dcd_to_bl(story_dcd["sphere_fade_in_end"])
-    cluster_blend_end_bl = dcd_to_bl(story_dcd["cluster_blend_end"])
+    transition_start_bl = dcd_to_bl(story_dcd["transition_start"])
+    transition_end_bl = dcd_to_bl(story_dcd["transition_end"])
+    with_sphere_hold_end_bl = dcd_to_bl(story_dcd["with_sphere_hold_end"])
     sphere_fade_out_end_bl = dcd_to_bl(story_dcd["sphere_fade_out_end"])
+    noncluster_fade_out_end_bl = transition_start_bl + int(FADE_NON_CLUSTER_OUT_DCD_FRAMES)
+    sphere_fade_in_end_bl = transition_start_bl + int(FADE_SPHERE_IN_DCD_FRAMES)
 
     # Cache per-instancer material for fast alpha updates.
     obj_materials = {}
@@ -836,52 +843,48 @@ def register_storyboard_handler(
         bf = scene.frame_current
         frame_xyz = get_interpolated_coords(coords, bf)   # (natoms, 3) in Å
 
-        if bf < zoom_fade_end_bl:
-            show_all = True
-            vis_idx = None
-        elif bf < sphere_fade_in_end_bl:
-            show_all = False
-            vis_idx = tritium_vis
-        else:
-            show_all = False
-            vis_idx = cluster_vis
-
-        # Non-tritium atoms: fade out during phase 1, stay hidden through
-        # tritium-only + zoom-out + sphere fade-in, then fade in as cluster.
-        if bf < zoom_fade_end_bl:
-            bulk_alpha = 1.0 - phase_progress(bf, start_bl, zoom_fade_end_bl)
-        elif bf < sphere_fade_in_end_bl:
-            bulk_alpha = 0.0
-        elif bf < cluster_blend_end_bl:
-            bulk_alpha = phase_progress(bf, sphere_fade_in_end_bl, cluster_blend_end_bl)
-        else:
-            bulk_alpha = 1.0
-
-        # Reference sphere: stay hidden through zoom-out, fade in, hold through
-        # cluster blend-in, then fade out.
-        if bf < zoom_out_end_bl:
-            sphere_alpha = 0.0
-        elif bf < sphere_fade_in_end_bl:
-            sphere_alpha = SPHERE_FINAL_ALPHA * phase_progress(
-                bf,
-                zoom_out_end_bl,
-                sphere_fade_in_end_bl,
+        # During transition and sphere phases, keep AtomCentre on the live cluster centroid so
+        # the reference sphere tracks the moving cluster.
+        if follow_cluster_center and bf >= transition_start_bl and len(dynamic_center_indices):
+            center_xyz = frame_xyz[dynamic_center_indices].mean(axis=0) * SCALE
+            target.location = Vector(
+                (float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2]))
             )
-        elif bf < cluster_blend_end_bl:
-            sphere_alpha = SPHERE_FINAL_ALPHA
+
+        # Non-cluster atoms: stay visible through zoom-to-T/focus, then fade out.
+        if bf < transition_start_bl:
+            noncluster_alpha = 1.0
+        elif bf < noncluster_fade_out_end_bl:
+            noncluster_alpha = 1.0 - phase_progress(
+                bf, transition_start_bl, noncluster_fade_out_end_bl
+            )
+        else:
+            noncluster_alpha = 0.0
+
+        # Sphere boundary: fade in during transition, hold, then fade out.
+        if bf < transition_start_bl:
+            boundary_alpha = 0.0
+        elif bf < sphere_fade_in_end_bl:
+            boundary_alpha = SPHERE_FINAL_ALPHA * phase_progress(
+                bf, transition_start_bl, sphere_fade_in_end_bl
+            )
+        elif bf < with_sphere_hold_end_bl:
+            boundary_alpha = SPHERE_FINAL_ALPHA
         elif bf < sphere_fade_out_end_bl:
-            sphere_alpha = SPHERE_FINAL_ALPHA * (
-                1.0 - phase_progress(bf, cluster_blend_end_bl, sphere_fade_out_end_bl)
+            boundary_alpha = SPHERE_FINAL_ALPHA * (
+                1.0 - phase_progress(bf, with_sphere_hold_end_bl, sphere_fade_out_end_bl)
             )
         else:
-            sphere_alpha = 0.0
+            boundary_alpha = 0.0
 
         for obj_name, mat in obj_materials.items():
-            if obj_name in bulk_object_names:
-                set_material_alpha(mat, bulk_alpha)
+            if obj_name in noncluster_object_names:
+                set_material_alpha(mat, noncluster_alpha)
             else:
                 set_material_alpha(mat, 1.0)
-        set_material_alpha(sphere_material, sphere_alpha)
+
+        for mat in boundary_materials:
+            set_material_alpha(mat, boundary_alpha)
 
         # Update each instancer mesh from its own global atom index list
         for obj_name, obj in instancer_objects.items():
@@ -889,11 +892,10 @@ def register_storyboard_handler(
             if g_idxs is None:
                 continue
 
-            if show_all:
-                positions = frame_xyz[g_idxs] * SCALE
+            if obj_name in noncluster_object_names and bf >= transition_end_bl:
+                positions = np.empty((0, 3), dtype=np.float32)
             else:
-                mask      = np.isin(g_idxs, vis_idx)
-                positions = frame_xyz[g_idxs[mask]] * SCALE
+                positions = frame_xyz[g_idxs] * SCALE
 
             mesh = obj.data
             mesh.clear_geometry()
@@ -924,20 +926,30 @@ def main():
         raise ValueError("STORY_DCD_STEPS must be >= 1.")
     if DCD_FRAME_OFFSET != STORY_DCD_START:
         raise ValueError("DCD_FRAME_OFFSET must match STORY_DCD_START in this storyboard script.")
-    phase_lengths = [
-        PHASE1_ZOOM_AND_FADE_DCD_FRAMES,
-        PHASE2_TRITIUM_ONLY_DCD_FRAMES,
-        PHASE3_ZOOM_OUT_DCD_FRAMES,
-        PHASE4_SPHERE_FADE_IN_DCD_FRAMES,
-        PHASE5_CLUSTER_BLEND_DCD_FRAMES,
-        PHASE6_SPHERE_FADE_OUT_DCD_FRAMES,
+    boundary_mode = BOUNDARY_MODE.strip().lower()
+    if boundary_mode not in {"sphere", "none"}:
+        raise ValueError('BOUNDARY_MODE must be one of: "sphere", "none".')
+    timing_values = [
+        PHASE1_ZOOM_TO_T_DCD_FRAMES,
+        PHASE2_T_FOCUS_HOLD_DCD_FRAMES,
+        PHASE4_WITH_SPHERE_HOLD_DCD_FRAMES,
+        FADE_NON_CLUSTER_OUT_DCD_FRAMES,
+        FADE_SPHERE_IN_DCD_FRAMES,
+        FADE_SPHERE_OUT_DCD_FRAMES,
     ]
-    phase_total = sum(phase_lengths)
-    if any(p < 0 for p in phase_lengths):
-        raise ValueError("All PHASE*_DCD_FRAMES values must be >= 0.")
+    if any(p < 0 for p in timing_values):
+        raise ValueError("All PHASE*/FADE*_DCD_FRAMES values must be >= 0.")
+    transition_frames = max(int(FADE_NON_CLUSTER_OUT_DCD_FRAMES), int(FADE_SPHERE_IN_DCD_FRAMES))
+    phase_total = (
+        int(PHASE1_ZOOM_TO_T_DCD_FRAMES)
+        + int(PHASE2_T_FOCUS_HOLD_DCD_FRAMES)
+        + transition_frames
+        + int(PHASE4_WITH_SPHERE_HOLD_DCD_FRAMES)
+        + int(FADE_SPHERE_OUT_DCD_FRAMES)
+    )
     if not (0.0 <= SPHERE_FINAL_ALPHA <= 1.0):
         raise ValueError("SPHERE_FINAL_ALPHA must be in [0, 1].")
-    if SPHERE_RADIUS_ANGSTROM <= 0.0:
+    if SPHERE_RADIUS_ANGSTROM <= 0.0 and boundary_mode == "sphere":
         raise ValueError("SPHERE_RADIUS_ANGSTROM must be > 0.")
 
     story_dcd = get_story_dcd_boundaries()
@@ -945,7 +957,7 @@ def main():
         raise ValueError(
             "Phase durations exceed STORY_DCD_STEPS: "
             f"total={phase_total}, STORY_DCD_STEPS={STORY_DCD_STEPS}. "
-            "Reduce PHASE*_DCD_FRAMES or increase STORY_DCD_STEPS."
+            "Reduce PHASE*/FADE*_DCD_FRAMES or increase STORY_DCD_STEPS."
         )
 
     # 1. Clear scene
@@ -973,7 +985,8 @@ def main():
 
     # 4. Build instancer objects.
     #    - One dedicated tritium object (always visible).
-    #    - Bulk element objects for all other atoms.
+    #    - Per-element cluster objects (always visible after transition).
+    #    - Per-element non-cluster objects (faded out during transition).
     element_global_indices = {}
     for g_idx, elem in enumerate(atom_order):
         element_global_indices.setdefault(elem, []).append(g_idx)
@@ -981,9 +994,17 @@ def main():
     if not (0 <= TRITIUM_IDX < len(atom_order)):
         raise ValueError(f"TRITIUM_IDX {TRITIUM_IDX} is out of range for this PDB ({len(atom_order)} atoms).")
 
+    n_atoms = len(flat_positions)
+    valid_cluster = [i for i in get_cluster_focus_indices() if 0 <= i < n_atoms]
+    invalid_cluster = [i for i in get_cluster_focus_indices() if not (0 <= i < n_atoms)]
+    if invalid_cluster:
+        print(f"WARNING: Ignoring out-of-range FOCUS_INDICES: {invalid_cluster}")
+    cluster_focus_set = set(valid_cluster)
+    cluster_focus_set.discard(TRITIUM_IDX)
+
     instancer_objects = {}
     instancer_index_map = {}
-    tritium_object_names = set()
+    noncluster_object_names = set()
 
     tritium_element = atom_order[TRITIUM_IDX]
     tritium_obj_name = f"Tritium_{TRITIUM_IDX}_{tritium_element}"
@@ -998,33 +1019,51 @@ def main():
     )
     instancer_objects[tritium_obj_name] = tritium_parent
     instancer_index_map[tritium_obj_name] = np.array([TRITIUM_IDX], dtype=np.int32)
-    tritium_object_names.add(tritium_obj_name)
     print(f"  Instancer: {tritium_obj_name} (index {TRITIUM_IDX})")
 
     for element in sorted(element_global_indices.keys()):
         g_idxs = element_global_indices[element]
-        bulk_idxs = [i for i in g_idxs if i != TRITIUM_IDX]
-        if not bulk_idxs:
-            continue
-        positions = [flat_positions[i] for i in bulk_idxs]
-        parent_obj, _ = create_element_objects(element, positions, mol_col, object_name=element)
-        instancer_objects[element] = parent_obj
-        instancer_index_map[element] = np.array(bulk_idxs, dtype=np.int32)
-        print(f"  Instancer: {element} ({len(bulk_idxs)} atoms)")
+        cluster_idxs = [i for i in g_idxs if i in cluster_focus_set]
+        noncluster_idxs = [i for i in g_idxs if i != TRITIUM_IDX and i not in cluster_focus_set]
 
-    bulk_object_names = set(instancer_objects.keys()) - tritium_object_names
+        if cluster_idxs:
+            cluster_name = f"Cluster_{element}"
+            cluster_positions = [flat_positions[i] for i in cluster_idxs]
+            cluster_color = ATOM_COLORS.get(element, DEFAULT_COLOR)
+            cluster_mat = make_material_with_color(f"Atom_{cluster_name}", cluster_color)
+            parent_obj, _ = create_element_objects(
+                element,
+                cluster_positions,
+                mol_col,
+                object_name=cluster_name,
+                material=cluster_mat,
+            )
+            instancer_objects[cluster_name] = parent_obj
+            instancer_index_map[cluster_name] = np.array(cluster_idxs, dtype=np.int32)
+            print(f"  Instancer: {cluster_name} ({len(cluster_idxs)} atoms)")
+
+        if noncluster_idxs:
+            bulk_name = f"Bulk_{element}"
+            bulk_positions = [flat_positions[i] for i in noncluster_idxs]
+            bulk_color = ATOM_COLORS.get(element, DEFAULT_COLOR)
+            bulk_mat = make_material_with_color(f"Atom_{bulk_name}", bulk_color)
+            parent_obj, _ = create_element_objects(
+                element,
+                bulk_positions,
+                mol_col,
+                object_name=bulk_name,
+                material=bulk_mat,
+            )
+            instancer_objects[bulk_name] = parent_obj
+            instancer_index_map[bulk_name] = np.array(noncluster_idxs, dtype=np.int32)
+            noncluster_object_names.add(bulk_name)
+            print(f"  Instancer: {bulk_name} ({len(noncluster_idxs)} atoms)")
 
     # 5. Compute static centroids from PDB
-    n_atoms  = len(flat_positions)
     cx = sum(p[0] for p in flat_positions) / n_atoms * SCALE
     cy = sum(p[1] for p in flat_positions) / n_atoms * SCALE
     cz = sum(p[2] for p in flat_positions) / n_atoms * SCALE
     centroid = Vector((cx, cy, cz))
-
-    valid_cluster = [i for i in get_cluster_focus_indices() if 0 <= i < n_atoms]
-    invalid_cluster = [i for i in get_cluster_focus_indices() if not (0 <= i < n_atoms)]
-    if invalid_cluster:
-        print(f"WARNING: Ignoring out-of-range FOCUS_INDICES: {invalid_cluster}")
     if valid_cluster:
         fcx = sum(flat_positions[i][0] for i in valid_cluster) / len(valid_cluster) * SCALE
         fcy = sum(flat_positions[i][1] for i in valid_cluster) / len(valid_cluster) * SCALE
@@ -1102,10 +1141,16 @@ def main():
         )
 
     # 8. Dynamic anchor points from trajectory
-    tritium_zoom_end_bl = dcd_to_bl(story_dcd["zoom_fade_end"])
+    tritium_zoom_end_bl = dcd_to_bl(story_dcd["zoom_to_t_end"])
     tritium_zoom_end_pos = get_interpolated_coords(coords, tritium_zoom_end_bl)[TRITIUM_IDX] * SCALE
     tritium_anchor = Vector((float(tritium_zoom_end_pos[0]), float(tritium_zoom_end_pos[1]), float(tritium_zoom_end_pos[2])))
-    _, sphere_material = create_reference_sphere(mol_col, target)
+
+    # Optional boundary visual (sphere).
+    boundary_materials = []
+
+    if boundary_mode == "sphere":
+        _, sphere_material = create_reference_sphere(mol_col, target)
+        boundary_materials.append(sphere_material)
 
     # 9. Set up camera animation keyframes
     setup_camera_animation(cam, target, centroid, tritium_anchor, cluster_center, story_dcd)
@@ -1125,8 +1170,11 @@ def main():
         coords,
         instancer_objects,
         instancer_index_map,
-        bulk_object_names,
-        sphere_material,
+        noncluster_object_names,
+        boundary_materials,
+        target,
+        np.array(valid_cluster, dtype=np.int32),
+        boundary_mode == "sphere",
         story_dcd,
     )
 

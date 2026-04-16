@@ -18,25 +18,29 @@ Large trajectory/data/render artifacts are excluded from version control via `.g
 `visualize_molecule_storyboard_tritium_cluster.py` is a dedicated storyboard for:
 
 1. all atoms + zoom toward tritium
-2. tritium-only progression
-3. zoom-out before sphere
-4. sphere fade-in
-5. cluster fade-in
-6. sphere fade-out
-7. cluster-only progression
+2. tritium-focused hold
+3. fade out non-cluster atoms while sphere fades in
+4. cluster + tritium hold with semi-transparent sphere
+5. sphere fade-out
+6. cluster + tritium tail
 
 Key defaults and knobs are in the script header:
 
 - Trajectory window: `STORY_DCD_START`, `STORY_DCD_STEPS`
-- Phase timing: `PHASE1_...` through `PHASE6_...`
+- Phase timing: `PHASE1_ZOOM_TO_T_DCD_FRAMES`, `PHASE2_T_FOCUS_HOLD_DCD_FRAMES`,
+  `PHASE4_WITH_SPHERE_HOLD_DCD_FRAMES`
+- Fade timing: `FADE_NON_CLUSTER_OUT_DCD_FRAMES`, `FADE_SPHERE_IN_DCD_FRAMES`,
+  `FADE_SPHERE_OUT_DCD_FRAMES`
 - Camera distances: `CAM_DIST_ALL_ATOMS`, `CAM_DIST_TRITIUM`, `CAM_DIST_SPHERE`, `CAM_DIST_CLUSTER`
 - Sphere style: `SPHERE_RADIUS_ANGSTROM`, `SPHERE_COLOR`, `SPHERE_FINAL_ALPHA`
+- Boundary mode: `BOUNDARY_MODE = "sphere" | "none"`
 
 Notes:
 
 - `TRITIUM_IDX = 1680`
 - Cluster atoms come from `FOCUS_INDICES`
-- The reference sphere is centered on the target empty (`AtomCentre`)
+- From phase 3 onward, the reference sphere center follows the live cluster centroid
+  (mean of `FOCUS_INDICES` atom positions) via `AtomCentre`
 - If `TRAJ_FILE` is blank, the script looks for `traj_nvt_interp.dcd`
 
 Minimal run:
