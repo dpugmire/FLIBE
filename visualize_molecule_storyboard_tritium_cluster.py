@@ -10,10 +10,9 @@ Run inside Blender via the Scripting workspace:
 Storyboard (all timings are DCD frame numbers):
   Phase 1  all atoms + zoom to tritium
   Phase 2  tritium-focused hold
-  Phase 3  fade out non-cluster atoms while fading sphere in (same phase)
-  Phase 4  hold cluster+tritium with semi-transparent sphere
-  Phase 5  fade sphere out
-  Phase 6  cluster+tritium tail
+  Phase 3  fade out non-cluster atoms while fading sphere in
+  Phase 4  fade sphere out immediately after sphere fade-in completes
+  Phase 5  cluster+tritium tail
 """
 
 import bpy
@@ -71,7 +70,6 @@ STORY_DCD_STEPS = 660
 # Storyboard phase timing (DCD frames). Remaining frames become phase 6 tail.
 PHASE1_ZOOM_TO_T_DCD_FRAMES = 200
 PHASE2_T_FOCUS_HOLD_DCD_FRAMES = 0
-PHASE4_WITH_SPHERE_HOLD_DCD_FRAMES = 60
 
 # Fade knobs (DCD frames).
 FADE_NON_CLUSTER_OUT_DCD_FRAMES = 60
@@ -115,9 +113,9 @@ CAM_INITIAL_SPACE = "WORLD"           # "WORLD" or "LOCAL"
 # Distance (Blender units; 1 BU = 10 Å) from AtomCentre.
 # Larger = further away / more zoomed out.
 CAM_DIST_ALL_ATOMS = 10.0  # phase 1 start (wide shot)
-CAM_DIST_TRITIUM   = 2.0   # zoomed-in tritium view
-CAM_DIST_SPHERE    = 5.0   # zoomed-out distance before sphere fade-in
-CAM_DIST_CLUSTER   = 5.0   # cluster view after blend-in
+CAM_DIST_TRITIUM   = 4.0   # zoomed-in tritium view
+CAM_DIST_SPHERE    = 4.0   # zoomed-out distance before sphere fade-in
+CAM_DIST_CLUSTER   = 4.0   # cluster view after blend-in
 
 # ── Display ───────────────────────────────────────────────────────────────────
 SCALE = 0.1          # Å → Blender units  (1 Å = 0.1 BU)
@@ -130,7 +128,7 @@ SPHERE_RINGS    = 32   # latitude divisions
 BOUNDARY_MODE = "sphere"
 
 # Static reference sphere (centered at the target empty).
-SPHERE_RADIUS_ANGSTROM = 9.0
+SPHERE_RADIUS_ANGSTROM = 7.7
 SPHERE_COLOR = (0.82, 0.82, 0.82, 1.0)  # light gray
 SPHERE_FINAL_ALPHA = 0.5                # 50% transparent
 
@@ -147,7 +145,7 @@ DEFAULT_RADIUS = 1.50
 ATOM_RADII['F'] *= 0.5
 ATOM_RADII['H'] *= 0.25
 ATOM_RADII['Be'] *= 0.5
-ATOM_RADII['Li'] *= 0.5
+ATOM_RADII['Li'] *= 0.4
 
 # ── CPK colours (RGBA, linear sRGB, values 0.0–1.0) ──────────────────────────
 ATOM_COLORS = {
@@ -273,7 +271,8 @@ def get_story_dcd_boundaries():
         int(FADE_NON_CLUSTER_OUT_DCD_FRAMES),
         int(FADE_SPHERE_IN_DCD_FRAMES),
     )
-    with_sphere_hold_end = transition_end + int(PHASE4_WITH_SPHERE_HOLD_DCD_FRAMES)
+    # No plateau: as soon as sphere fade-in reaches SPHERE_FINAL_ALPHA, fade-out starts.
+    with_sphere_hold_end = transition_start + int(FADE_SPHERE_IN_DCD_FRAMES)
     sphere_fade_out_end = with_sphere_hold_end + int(FADE_SPHERE_OUT_DCD_FRAMES)
     return {
         "start": start,
@@ -861,15 +860,13 @@ def register_storyboard_handler(
         else:
             noncluster_alpha = 0.0
 
-        # Sphere boundary: fade in during transition, hold, then fade out.
+        # Sphere boundary: fade in during transition, then immediately fade out.
         if bf < transition_start_bl:
             boundary_alpha = 0.0
         elif bf < sphere_fade_in_end_bl:
             boundary_alpha = SPHERE_FINAL_ALPHA * phase_progress(
                 bf, transition_start_bl, sphere_fade_in_end_bl
             )
-        elif bf < with_sphere_hold_end_bl:
-            boundary_alpha = SPHERE_FINAL_ALPHA
         elif bf < sphere_fade_out_end_bl:
             boundary_alpha = SPHERE_FINAL_ALPHA * (
                 1.0 - phase_progress(bf, with_sphere_hold_end_bl, sphere_fade_out_end_bl)
@@ -932,7 +929,6 @@ def main():
     timing_values = [
         PHASE1_ZOOM_TO_T_DCD_FRAMES,
         PHASE2_T_FOCUS_HOLD_DCD_FRAMES,
-        PHASE4_WITH_SPHERE_HOLD_DCD_FRAMES,
         FADE_NON_CLUSTER_OUT_DCD_FRAMES,
         FADE_SPHERE_IN_DCD_FRAMES,
         FADE_SPHERE_OUT_DCD_FRAMES,
@@ -944,7 +940,6 @@ def main():
         int(PHASE1_ZOOM_TO_T_DCD_FRAMES)
         + int(PHASE2_T_FOCUS_HOLD_DCD_FRAMES)
         + transition_frames
-        + int(PHASE4_WITH_SPHERE_HOLD_DCD_FRAMES)
         + int(FADE_SPHERE_OUT_DCD_FRAMES)
     )
     if not (0.0 <= SPHERE_FINAL_ALPHA <= 1.0):

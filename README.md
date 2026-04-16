@@ -20,15 +20,13 @@ Large trajectory/data/render artifacts are excluded from version control via `.g
 1. all atoms + zoom toward tritium
 2. tritium-focused hold
 3. fade out non-cluster atoms while sphere fades in
-4. cluster + tritium hold with semi-transparent sphere
-5. sphere fade-out
-6. cluster + tritium tail
+4. sphere fades out immediately after fade-in completes
+5. cluster + tritium tail
 
 Key defaults and knobs are in the script header:
 
 - Trajectory window: `STORY_DCD_START`, `STORY_DCD_STEPS`
-- Phase timing: `PHASE1_ZOOM_TO_T_DCD_FRAMES`, `PHASE2_T_FOCUS_HOLD_DCD_FRAMES`,
-  `PHASE4_WITH_SPHERE_HOLD_DCD_FRAMES`
+- Phase timing: `PHASE1_ZOOM_TO_T_DCD_FRAMES`, `PHASE2_T_FOCUS_HOLD_DCD_FRAMES`
 - Fade timing: `FADE_NON_CLUSTER_OUT_DCD_FRAMES`, `FADE_SPHERE_IN_DCD_FRAMES`,
   `FADE_SPHERE_OUT_DCD_FRAMES`
 - Camera distances: `CAM_DIST_ALL_ATOMS`, `CAM_DIST_TRITIUM`, `CAM_DIST_SPHERE`, `CAM_DIST_CLUSTER`
